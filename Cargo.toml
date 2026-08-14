@@ -1,0 +1,24 @@
+[package]
+name = "apothiki"
+version = "0.1.0"
+edition = "2021"
+description = "Application-centric package explorer for Arch Linux"
+
+[[bin]]
+name = "apo"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+thiserror = "2"
+flate2 = "1"
+tar = "0.4"
+zstd = "0.13"
+
+[dev-dependencies]
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
