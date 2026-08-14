@@ -5,11 +5,66 @@
 //! `data/` and `apps/` first, do not start with the UI).
 
 mod data;
+mod verify;
 
+use data::fileindex::FileIndex;
+use data::graph::{Graph, OrphanMode};
 use data::local::{LocalDb, Reason};
 use data::sync::SyncDb;
 
 fn main() -> anyhow::Result<()> {
+    match std::env::args().nth(1).as_deref() {
+        Some("verify") => return run_verify(),
+        _ => {}
+    }
+    stats()
+}
+
+/// Checks the dependency model against pacman itself. See `verify`.
+fn run_verify() -> anyhow::Result<()> {
+    let db = LocalDb::load(LocalDb::DEFAULT_ROOT)?;
+    let g = Graph::build(&db);
+
+    // A bare number samples that many packages; explicit names re-check known
+    // divergences cheaply. The full sweep spawns one pacman per package and is
+    // heavy enough to be felt on a loaded desktop, so it is never the default.
+    let args: Vec<String> = std::env::args().skip(2).collect();
+    let named: Vec<String> = args
+        .iter()
+        .filter(|a| a.parse::<usize>().is_err())
+        .cloned()
+        .collect();
+    let samples: usize = args
+        .iter()
+        .find_map(|a| a.parse().ok())
+        .unwrap_or(60);
+
+    println!("verifying {} packages against pacman", g.len());
+    if !g.unresolved.is_empty() {
+        println!(
+            "  {} unresolved dependency strings (first 10): {:?}",
+            g.unresolved.len(),
+            g.unresolved.iter().take(10).collect::<Vec<_>>()
+        );
+    }
+
+    let report = if named.is_empty() {
+        verify::run(&g, samples)?
+    } else {
+        verify::run_named(&g, &named)?
+    };
+    println!("\n{} checks, {} failures", report.checks, report.failures.len());
+    for f in &report.failures {
+        println!("  FAIL {f}");
+    }
+    if !report.ok() {
+        std::process::exit(1);
+    }
+    println!("all checks passed");
+    Ok(())
+}
+
+fn stats() -> anyhow::Result<()> {
     let started = std::time::Instant::now();
     let db = LocalDb::load(LocalDb::DEFAULT_ROOT)?;
     let local_done = started.elapsed();
@@ -38,6 +93,22 @@ fn main() -> anyhow::Result<()> {
     println!("  dependency: {}", db.packages.len() - explicit);
     println!("  foreign (in no repo, i.e. AUR/local): {}", foreign.len());
     println!("  installed size: {:.2} GiB", total_size as f64 / (1 << 30) as f64);
+
+    let t = std::time::Instant::now();
+    let (index, outcome) = FileIndex::load_or_build(&db);
+    println!(
+        "\nfile index: {} files in {:.1?} ({outcome:?})",
+        index.len(),
+        t.elapsed()
+    );
+    // The index exists to answer exactly this question, ~350 times, instantly.
+    for probe in [
+        "/usr/share/applications/org.kde.filelight.desktop",
+        "/usr/share/metainfo/org.kde.dolphin.appdata.xml",
+        "/usr/bin/pacman",
+    ] {
+        println!("  {probe} -> {:?}", index.owner(probe));
+    }
 
     // A repo that fails to load makes its packages look foreign, so this must
     // never be silent.

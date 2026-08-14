@@ -6,5 +6,7 @@
 
 pub mod dep;
 pub mod descfmt;
+pub mod fileindex;
+pub mod graph;
 pub mod local;
 pub mod sync;

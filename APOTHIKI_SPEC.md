@@ -396,18 +396,62 @@ real dry-run before executing.** Never execute based only on our own computation
   `provides → providers` map and resolve through it, including versioned provides
   (`foo=1.2`) and soname provides (`libfoo.so=1-64`). Without this the graph has holes and
   the orphan computation is wrong.
-- **Version constraints.** `depends` entries can be `foo>=1.2`. Strip the constraint for
-  graph edges; you don't need version resolution for an already-consistent installed set.
+- **Version constraints.** Strip them for dependencies on **real package names** — an
+  already-consistent installed set satisfies them by definition. **Never strip them when
+  resolving through `provides`.** For sonames the version *is* the identity, and the
+  `-32`/`-64` suffix is the ELF class:
+
+  ```text
+  libxml2         provides libxml2.so=16-64      different libraries
+  libxml2-legacy  provides libxml2.so=2-64
+  glew            provides libGLEW.so=2.3-64     different architectures
+  lib32-glew      provides libGLEW.so=2.3-32
+  ```
+
+  Stripping fuses the 32- and 64-bit worlds and makes every legacy compatibility package
+  look permanently required, so it never appears in a removal cascade. Verified: this alone
+  accounted for 3 of 5 divergences from `pacman -Rs --print` across 1656 packages.
+  Compare exact-versus-exact only; range constraints on true virtuals (`java-runtime>=11`)
+  are rare and resolving them permissively errs in the safe direction.
+
+- **A real package and its providers both satisfy a dependency.** `ca-certificates-utils`
+  provides `ca-certificates`, and a package of that name also exists. Treating the real
+  package as the sole satisfier drops the provider's reverse edges and makes it look
+  removable when seven packages still need it.
+
+- **Removal planning must mirror alpm, not our own analysis.** Its job is to *predict
+  pacman*, and pacman reasons by reference count while we reason by reachability. The two
+  genuinely differ: a package kept alive only by an orphan is not an orphan to pacman, but
+  removing that orphan does take it. A package joins the removal when (1) something already
+  being removed depends on it, (2) it was installed as a dependency, and (3) everything
+  requiring it is also being removed. Condition (1) is what leaves *pre-existing* orphans
+  alone — omitting it made removing one program claim to remove fourteen unrelated packages.
+
+- **Cycles must be removed as a group.** Inside a cycle every member is required by another,
+  so a package-at-a-time rule deadlocks and the cycle is never freed. Condense the graph into
+  strongly-connected components and judge each component against the world outside it. Real
+  examples on the dev machine: `tesseract` ⇄ `tesseract-data-eng` (via the `tessdata`
+  provide) and `python-beautifulsoup4` ⇄ `python-soupsieve`. Use iterative Tarjan; recursion
+  depth follows the dependency chain.
 - **`optdepends` are not edges.** They are documentation. But removing one silently
   degrades an app — no error, features just stop working. This is the #1 way users break
   things without knowing. **Surface optdepends prominently and separately**, with the
   reason string pacman stores, and warn when a removal target is an optdep of something
   installed.
-- **Dependency cycles.** `pacman -Qdt` is a **refcount**, not a garbage collector. A cycle
-  of mutually-depending orphans is invisible to it forever. If we want correct orphan
-  detection, do a proper reachability pass from explicit-install roots. Flag
-  cycle-trapped packages separately — they are almost always genuine garbage, but present
-  them cautiously since pacman itself won't have flagged them.
+- **Orphans hidden from refcounting.** `pacman -Qdt` is a **refcount**, not a garbage
+  collector, so a reachability pass from the explicit-install roots finds orphans it cannot.
+  Two distinct shapes end up here and the UI must not conflate them:
+
+  - **Transitively stranded** — an orphan root with a tree beneath it. Measured on the dev
+    machine: `npm` is required by nothing, yet keeps `nodejs`, `node-gyp`, `nodejs-nopt`,
+    `semver`, `ada` and `simdjson` at non-zero refcounts, so `-Qdtt` reports none of them.
+    This is the common case, and it is *not* a cycle.
+  - **Cycle-trapped** — mutually-requiring packages, which refcounting can never free no
+    matter what is removed first.
+
+  Distinguishing them needs a real reachability test; "something requiring it is also an
+  orphan" labels the first shape as the second. Both are almost always genuine garbage, but
+  present them cautiously since pacman itself won't have flagged them.
 - **`-Qdt` vs `-Qdtt`.** The single-`t` form excludes packages that are *optional*
   dependencies of something. The double-`t` form includes them. These are different
   safety levels. Expose both, default to the safer `-Qdt`.
@@ -796,6 +840,12 @@ Ordered roughly by likelihood of causing a bug.
 9. Terminal state not restored on panic → wrecked terminal
 10. `alpm` crate ABI break → tool doesn't compile after a pacman update
 11. Version constraints in `depends` not stripped → no edges match
+16. Version constraints stripped from **provides** → 32-bit and legacy packages fused with
+    their 64-bit or current counterparts, and never removable
+17. Removal cascade computed from reachability rather than alpm's refcount rule →
+    pre-existing orphans swept into unrelated removals
+18. Dependency cycles judged one package at a time → cascade deadlocks, and pacman removes
+    packages we promised would stay
 12. Multi-package apps not merged (`gimp` + `gimp-help-*`) → duplicate rows
 13. AppImage panel shows an empty dependency list → looks broken
 14. Cache not versioned → old cache misparsed after a format change
