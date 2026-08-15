@@ -5,6 +5,7 @@
 
 pub mod exec;
 pub mod history;
+pub mod restore;
 pub mod safety;
 pub mod snapshot;
 

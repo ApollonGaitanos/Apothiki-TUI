@@ -75,7 +75,6 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
     let popup = centred(area, 86, 28);
 
     let mut lines: Vec<Line> = Vec::new();
-    let names = d.request.package_names(graph);
     let title = match &d.stage {
         Stage::Running => " removing… ",
         Stage::Done { success: true } => " done ",
@@ -85,6 +84,14 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
 
     match &d.stage {
         Stage::Confirm | Stage::TypeToConfirm => {
+            // Restoring is a different operation with a different shape: no
+            // modes, no cascade, no typed confirmation.
+            if let Some(plan) = d.job.as_restore() {
+                draw_restore_confirm(f, popup, plan);
+                return;
+            }
+            let Some(req) = d.job.as_removal() else { return };
+            let names = req.package_names(graph);
             lines.push(Line::styled(
                 names.join(", "),
                 Style::default().add_modifier(Modifier::BOLD).fg(ACCENT),
@@ -92,7 +99,7 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
 
             // A blocked removal explains itself and offers nothing. There is no
             // override, by design (spec §6.1).
-            if let Some(p) = &d.request.blocked_by {
+            if let Some(p) = &req.blocked_by {
                 lines.push(Line::raw(""));
                 lines.push(Line::styled(p.explain(), Style::default().fg(DANGER)));
                 lines.push(Line::raw(""));
@@ -105,9 +112,8 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
                 return;
             }
 
-            if d.request.plan.is_blocked() {
-                let who: Vec<&str> = d
-                    .request
+            if req.plan.is_blocked() {
+                let who: Vec<&str> = req
                     .plan
                     .blockers
                     .iter()
@@ -149,20 +155,19 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
             }
 
             lines.push(Line::raw(""));
-            let total = d.request.plan.all_removed().len();
+            let total = req.plan.all_removed().len();
             lines.push(Line::raw(format!(
                 "{total} packages, {} freed",
-                human_size(d.request.plan.freed_bytes)
+                human_size(req.plan.freed_bytes)
             )));
-            if !d.request.apps_lost.is_empty() {
+            if !req.apps_lost.is_empty() {
                 lines.push(Line::styled(
-                    format!("Applications removed: {}", d.request.apps_lost.join(", ")),
+                    format!("Applications removed: {}", req.apps_lost.join(", ")),
                     Style::default().fg(DANGER),
                 ));
             }
-            if !d.request.plan.optdep_losses.is_empty() {
-                let who: Vec<&str> = d
-                    .request
+            if !req.plan.optdep_losses.is_empty() {
+                let who: Vec<&str> = req
                     .plan
                     .optdep_losses
                     .iter()
@@ -175,7 +180,7 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
                 ));
             }
 
-            let risk_colour = match d.request.risk {
+            let risk_colour = match req.risk {
                 Risk::Safe => OK,
                 Risk::Caution => WARN,
                 _ => DANGER,
@@ -184,8 +189,8 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
             lines.push(Line::styled(
                 format!(
                     "[{}] {}",
-                    d.request.risk.symbol(),
-                    super::removal::risk_sentence(d.request.risk, &d.request.apps_lost)
+                    req.risk.symbol(),
+                    super::removal::risk_sentence(req.risk, &req.apps_lost)
                 ),
                 Style::default().fg(risk_colour),
             ));
@@ -199,7 +204,7 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
                 Style::default().fg(if d.snapshot { OK } else { DIM }),
             ));
             lines.push(Line::styled(
-                format!("$ {}", d.request.command_line(graph)),
+                format!("$ {}", req.command_line(graph)),
                 Style::default().fg(DIM),
             ));
 
@@ -214,7 +219,7 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
 
             lines.push(Line::raw(""));
             lines.push(Line::styled(
-                if d.request.risk.needs_typed_confirmation() && !matches!(d.stage, Stage::TypeToConfirm) {
+                if req.risk.needs_typed_confirmation() && !matches!(d.stage, Stage::TypeToConfirm) {
                     "↑↓ mode   Enter/→ continue   Esc cancel"
                 } else if matches!(d.stage, Stage::TypeToConfirm) {
                     "Enter confirm   Esc cancel"
@@ -264,6 +269,89 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
     }
 
     render_popup(f, popup, title, lines);
+}
+
+/// The undo dialog.
+///
+/// States plainly what can and cannot be brought back: a purge deleted config
+/// files, and no reinstall returns them.
+fn draw_restore_confirm(f: &mut Frame, popup: Rect, plan: &crate::ops::restore::RestorePlan) {
+    let mut lines: Vec<Line> = vec![Line::styled(
+        "Undo the last removal",
+        Style::default().add_modifier(Modifier::BOLD).fg(ACCENT),
+    )];
+    lines.push(Line::styled(
+        format!("removed with {} on {}", plan.operation, format_date(plan.timestamp)),
+        Style::default().fg(DIM),
+    ));
+    lines.push(Line::raw(""));
+
+    if !plan.missing.is_empty() {
+        lines.push(Line::styled(
+            format!(
+                "{} package(s) are no longer in the package cache:",
+                plan.missing.len()
+            ),
+            Style::default().fg(DANGER),
+        ));
+        for (n, v) in plan.missing.iter().take(6) {
+            lines.push(Line::styled(format!("  {n} {v}"), Style::default().fg(DIM)));
+        }
+        lines.push(Line::raw(""));
+        lines.push(Line::styled(
+            "A partial restore would leave the system in a state neither you",
+            Style::default().fg(DIM),
+        ));
+        lines.push(Line::styled(
+            "nor this tool could describe, so it is not offered.",
+            Style::default().fg(DIM),
+        ));
+        lines.push(Line::styled(
+            "Reinstall from the repositories instead, or roll back the snapshot.",
+            Style::default().fg(DIM),
+        ));
+        lines.push(Line::styled("Esc to close", Style::default().fg(DIM)));
+        render_popup(f, popup, " undo ", lines);
+        return;
+    }
+
+    lines.push(Line::raw(format!(
+        "Reinstall {} package(s) from the local cache:",
+        plan.available.len()
+    )));
+    for (n, v, _) in plan.available.iter().take(10) {
+        lines.push(Line::raw(format!("  {n} {v}")));
+    }
+    if plan.available.len() > 10 {
+        lines.push(Line::styled(
+            format!("  … and {} more", plan.available.len() - 10),
+            Style::default().fg(DIM),
+        ));
+    }
+
+    if plan.configs_were_purged {
+        lines.push(Line::raw(""));
+        lines.push(Line::styled(
+            "That removal was a purge: config files were deleted and cannot",
+            Style::default().fg(WARN),
+        ));
+        lines.push(Line::styled(
+            "be restored by reinstalling. Only the packages come back.",
+            Style::default().fg(WARN),
+        ));
+    }
+
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        format!("$ {}", plan.command_line()),
+        Style::default().fg(DIM),
+    ));
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        "Enter restore   Esc cancel",
+        Style::default().fg(DIM),
+    ));
+    render_popup(f, popup, " undo ", lines);
 }
 
 fn render_popup(f: &mut Frame, popup: Rect, title: &str, lines: Vec<Line>) {
@@ -364,9 +452,16 @@ fn row_line<'a>(ui: &'a Ui, item: Item) -> Line<'a> {
             Line::from(vec![
                 Span::styled(format!("{tag:<5} "), Style::default().fg(colour)),
                 Span::raw(app.name.clone()),
+                Span::styled(size_suffix(ui, app), Style::default().fg(DIM)),
             ])
         }
-        Item::Tool(i) => Line::from(ui.state.catalog.tools[i].name.clone()),
+        Item::Tool(i) => {
+            let tool = &ui.state.catalog.tools[i];
+            Line::from(vec![
+                Span::raw(tool.name.clone()),
+                Span::styled(size_suffix(ui, tool), Style::default().fg(DIM)),
+            ])
+        }
         Item::Package(p) => {
             let pkg = &ui.state.db.packages[p as usize];
             Line::from(vec![
@@ -377,6 +472,14 @@ fn row_line<'a>(ui: &'a Ui, item: Item) -> Line<'a> {
                 ),
             ])
         }
+    }
+}
+
+/// Trailing size for a list row, empty when pacman does not own the app.
+fn size_suffix(ui: &Ui, app: &crate::apps::App) -> String {
+    match ui.app_size(app) {
+        Some(bytes) => format!("  {}", human_size(bytes)),
+        None => String::new(),
     }
 }
 
@@ -743,6 +846,7 @@ fn draw_keybar(f: &mut Frame, area: Rect, ui: &Ui) {
             ("→", "open"),
             ("←", "back"),
             ("Del", "remove"),
+            ("Ctrl+Z", "undo"),
         ];
         if ui.view == View::Orphans {
             h.push(("c", "clean all"));
@@ -757,6 +861,19 @@ fn draw_keybar(f: &mut Frame, area: Rect, ui: &Ui) {
         h.push(("Ctrl+Q", "quit"));
         h
     };
+
+    // A transient message replaces the hints: it is why the last keypress did
+    // nothing, and that is more useful than the hints for one moment.
+    if let Some(notice) = &ui.notice {
+        f.render_widget(
+            Paragraph::new(Line::styled(
+                format!(" {notice} "),
+                Style::default().fg(Color::Black).bg(WARN),
+            )),
+            area,
+        );
+        return;
+    }
 
     let mut spans: Vec<Span> = Vec::new();
     for (key, what) in hints {
@@ -788,6 +905,7 @@ fn draw_help(f: &mut Frame, area: Rect, ui: &Ui) {
         Line::raw("→ or Enter     open: list → relationships → package"),
         Line::raw("← or Backspace go back"),
         Line::raw("Del            remove the selected package"),
+        Line::raw("Ctrl+Z         undo the last removal (from package cache)"),
         Line::raw("c  (Orphans)   clean up all orphans"),
         Line::raw("Space (Orphans) toggle -Qdt / -Qdtt"),
         Line::raw("Ctrl+Q         quit"),

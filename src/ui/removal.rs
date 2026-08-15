@@ -35,8 +35,39 @@ pub enum Stage {
     Done { success: bool },
 }
 
+/// What the dialog is about to do.
+///
+/// Restore shares the dialog because it shares everything that matters: the
+/// confirm/authenticate/stream/report machine. Only the summary text and the
+/// command differ, and duplicating the state machine is exactly how the two
+/// would drift apart.
+pub enum Job {
+    Remove(RemovalRequest),
+    Restore(crate::ops::restore::RestorePlan),
+}
+
+impl Job {
+    pub fn is_restore(&self) -> bool {
+        matches!(self, Job::Restore(_))
+    }
+
+    pub fn as_removal(&self) -> Option<&RemovalRequest> {
+        match self {
+            Job::Remove(r) => Some(r),
+            Job::Restore(_) => None,
+        }
+    }
+
+    pub fn as_restore(&self) -> Option<&crate::ops::restore::RestorePlan> {
+        match self {
+            Job::Restore(p) => Some(p),
+            Job::Remove(_) => None,
+        }
+    }
+}
+
 pub struct RemovalDialog {
-    pub request: RemovalRequest,
+    pub job: Job,
     pub stage: Stage,
     pub mode_index: usize,
     /// What the user has typed for confirmation, or into the password field.
@@ -60,7 +91,7 @@ impl RemovalDialog {
             .unwrap_or(0);
         RemovalDialog {
             snapshot: request.snapshot,
-            request,
+            job: Job::Remove(request),
             stage: Stage::Confirm,
             mode_index,
             typed: String::new(),
@@ -72,8 +103,46 @@ impl RemovalDialog {
         }
     }
 
+    /// Restoring a removed package is not destructive, so it takes a snapshot
+    /// only if one is available and never demands a typed confirmation.
+    pub fn restore(plan: crate::ops::restore::RestorePlan) -> Self {
+        RemovalDialog {
+            snapshot: false,
+            job: Job::Restore(plan),
+            stage: Stage::Confirm,
+            mode_index: 0,
+            typed: String::new(),
+            password: String::new(),
+            error: None,
+            output: Vec::new(),
+            receiver: None,
+            confirm_word: String::new(),
+        }
+    }
+
+    /// The removal request, for the paths that only apply to removals.
+    pub fn request(&self) -> Option<&RemovalRequest> {
+        self.job.as_removal()
+    }
+
     pub fn mode(&self) -> RemovalMode {
         RemovalMode::ALL[self.mode_index]
+    }
+
+    /// Whether this job may proceed at all.
+    pub fn blocked(&self) -> bool {
+        match &self.job {
+            Job::Remove(r) => r.is_blocked(),
+            // A restore that cannot be completed in full is never offered.
+            Job::Restore(p) => !p.is_complete(),
+        }
+    }
+
+    pub fn needs_typed_confirmation(&self) -> bool {
+        match &self.job {
+            Job::Remove(r) => r.risk.needs_typed_confirmation(),
+            Job::Restore(_) => false,
+        }
     }
 
     /// True when the typed confirmation matches. Compared exactly — a
@@ -84,11 +153,11 @@ impl RemovalDialog {
 
     /// Whether the dialog can proceed from the confirm stage.
     pub fn can_proceed(&self) -> bool {
-        if self.request.is_blocked() {
+        if self.blocked() {
             return false;
         }
         match self.stage {
-            Stage::Confirm => !self.request.risk.needs_typed_confirmation(),
+            Stage::Confirm => !self.needs_typed_confirmation(),
             Stage::TypeToConfirm => self.confirmation_satisfied(),
             _ => false,
         }
@@ -150,6 +219,59 @@ pub fn verify_against_pacman(
         ));
     }
     Ok(theirs)
+}
+
+/// Spawns a restore on a background thread.
+///
+/// Deliberately simpler than the removal path: no snapshot, because putting
+/// packages back is not the operation that needs undoing, and every file comes
+/// from the local cache so nothing is fetched.
+pub fn spawn_restore(plan: crate::ops::restore::RestorePlan, tx: Sender<Output>) {
+    std::thread::spawn(move || {
+        if dry_run_mode() {
+            let _ = tx.send(Output::Line(
+                "APOTHIKI_DRY_RUN is set — nothing will be installed".into(),
+            ));
+            let _ = tx.send(Output::Line(format!("would run: {}", plan.command_line())));
+            let _ = tx.send(Output::Finished { success: true, code: Some(0) });
+            return;
+        }
+
+        let (rtx, rrx) = std::sync::mpsc::channel();
+        exec::run_privileged("pacman", &plan.args(), rtx);
+
+        let mut success = false;
+        for msg in rrx {
+            match msg {
+                Output::Line(l) => {
+                    let _ = tx.send(Output::Line(l));
+                }
+                Output::Finished { success: s, code } => {
+                    success = s;
+                    let _ = tx.send(Output::Finished { success: s, code });
+                }
+                Output::Failed(e) => {
+                    let _ = tx.send(Output::Failed(e));
+                }
+            }
+        }
+
+        let entry = history::Entry {
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0),
+            operation: "-U (undo)".to_string(),
+            packages: plan
+                .available
+                .iter()
+                .map(|(n, v, _)| (n.clone(), v.clone()))
+                .collect(),
+            success,
+            snapshot: None,
+        };
+        let _ = history::record(&entry);
+    });
 }
 
 /// Spawns the privileged work on a background thread.

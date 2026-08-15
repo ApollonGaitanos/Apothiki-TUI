@@ -144,6 +144,9 @@ pub struct Ui {
     apps_named_by_package: HashMap<String, Vec<String>>,
     /// Set after a removal completes, so the next tick can reload.
     pub needs_reload: bool,
+    /// A transient message shown in the hint bar, so a keypress that cannot do
+    /// anything explains itself instead of appearing broken.
+    pub notice: Option<String>,
     /// Terminal graphics backend, probed once at startup.
     pub picker: Option<ratatui_image::picker::Picker>,
     /// Decoded icon for the current selection, with the key it was built for.
@@ -204,6 +207,7 @@ impl Ui {
             app_package_names,
             apps_named_by_package,
             needs_reload: false,
+            notice: None,
             picker,
             icon: None,
         };
@@ -445,6 +449,26 @@ impl Ui {
         self.rebuild_rows();
     }
 
+    /// Total installed size of everything backing an app.
+    ///
+    /// Summed across all its packages, so a merged app reports what removing
+    /// the whole thing would actually reclaim rather than just its primary
+    /// package. Returns `None` when no package backs it — Flatpak, AppImage and
+    /// Steam entries have a size, but not one pacman knows, and inventing a
+    /// zero would read as "this takes no space".
+    pub fn app_size(&self, app: &crate::apps::App) -> Option<u64> {
+        if app.packages.is_empty() {
+            return None;
+        }
+        Some(
+            app.packages
+                .iter()
+                .filter_map(|p| self.state.graph.index_of(p))
+                .map(|i| self.state.db.packages[i as usize].size_bytes())
+                .sum(),
+        )
+    }
+
     /// The decoded icon for the current selection, if any.
     ///
     /// Cached against the selection key so a redraw never touches the disk.
@@ -499,6 +523,20 @@ impl Ui {
         self.dialog = Some(RemovalDialog::new(request, word));
     }
 
+    /// Opens the undo dialog for the most recent removal.
+    ///
+    /// Says why when there is nothing to undo, rather than doing nothing: a
+    /// keypress that silently does nothing is indistinguishable from a bug.
+    fn open_undo(&mut self) {
+        match crate::ops::restore::last_undoable() {
+            Some(entry) => {
+                let plan = crate::ops::restore::plan_from(&entry);
+                self.dialog = Some(RemovalDialog::restore(plan));
+            }
+            None => self.notice = Some("nothing to undo — no removal has been recorded".into()),
+        }
+    }
+
     /// Opens the dialog for a bulk orphan cleanup.
     fn open_orphan_cleanup(&mut self) {
         // Only the orphans pacman itself reports (spec decision): our extra
@@ -523,7 +561,8 @@ impl Ui {
     /// always describes the mode actually selected.
     fn refresh_dialog_request(&mut self) {
         let Some(d) = &self.dialog else { return };
-        let (targets, mode) = (d.request.targets.clone(), d.mode());
+        let Some(req) = d.request() else { return };
+        let (targets, mode) = (req.targets.clone(), d.mode());
         let request = RemovalRequest::build(
             &self.state.graph,
             &self.denylist,
@@ -533,7 +572,7 @@ impl Ui {
             &self.apps_named_by_package,
         );
         if let Some(d) = &mut self.dialog {
-            d.request = request;
+            d.job = removal::Job::Remove(request);
         }
     }
 
@@ -541,12 +580,12 @@ impl Ui {
     /// authenticate, then run.
     fn confirm_removal(&mut self) {
         let Some(d) = &self.dialog else { return };
-        if d.request.is_blocked() {
+        if d.blocked() {
             return;
         }
 
         // Dangerous removals need the name typed before anything else happens.
-        if d.request.risk.needs_typed_confirmation() && !matches!(d.stage, Stage::TypeToConfirm) {
+        if d.needs_typed_confirmation() && !matches!(d.stage, Stage::TypeToConfirm) {
             if let Some(d) = &mut self.dialog {
                 d.stage = Stage::TypeToConfirm;
             }
@@ -556,13 +595,16 @@ impl Ui {
             return;
         }
 
-        // The last gate: pacman's own answer must match ours.
-        if let Err(e) = removal::verify_against_pacman(&self.dialog.as_ref().unwrap().request, &self.state.graph) {
-            if let Some(d) = &mut self.dialog {
-                d.error = Some(e);
-                d.stage = Stage::Done { success: false };
+        // The last gate for a removal: pacman's own answer must match ours.
+        // A restore has nothing to reconcile — it installs named files.
+        if let Some(req) = self.dialog.as_ref().and_then(|d| d.request()) {
+            if let Err(e) = removal::verify_against_pacman(req, &self.state.graph) {
+                if let Some(d) = &mut self.dialog {
+                    d.error = Some(e);
+                    d.stage = Stage::Done { success: false };
+                }
+                return;
             }
-            return;
         }
 
         match removal::auth_stage() {
@@ -584,17 +626,28 @@ impl Ui {
 
     fn start_removal(&mut self) {
         let Some(d) = &mut self.dialog else { return };
+
+        // Restores take the simpler path: files from the local cache, no
+        // snapshot, nothing to reconcile.
+        if let Some(plan) = d.job.as_restore().cloned() {
+            let (tx, rx) = std::sync::mpsc::channel();
+            removal::spawn_restore(plan, tx);
+            d.receiver = Some(rx);
+            d.stage = Stage::Running;
+            d.output.clear();
+            return;
+        }
+
+        let Some(req) = d.job.as_removal() else { return };
         let graph = &self.state.graph;
-        let names: Vec<String> = d
-            .request
+        let names: Vec<String> = req
             .targets
             .iter()
             .map(|&t| graph.name(t).to_string())
             .collect();
         // Exact versions, so an offline reinstall from the package cache is
         // possible later (spec §6.5).
-        let versions: Vec<(String, String)> = d
-            .request
+        let versions: Vec<(String, String)> = req
             .plan
             .all_removed()
             .iter()
@@ -698,6 +751,7 @@ impl Ui {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) {
+        self.notice = None;
         if self.dialog.is_some() {
             self.handle_dialog_key(key);
             return;
@@ -757,6 +811,8 @@ impl Ui {
             }
 
             KeyCode::Delete => self.open_removal(),
+            // Undo the last removal, restoring from the package cache.
+            KeyCode::Char('z') if ctrl => self.open_undo(),
             // Bulk orphan cleanup, offered only where it makes sense.
             KeyCode::Char('c') if self.view == View::Orphans => self.open_orphan_cleanup(),
 

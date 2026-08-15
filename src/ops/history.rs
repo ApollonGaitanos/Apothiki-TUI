@@ -86,6 +86,81 @@ pub fn record(entry: &Entry) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Reads every logged transaction, oldest first.
+///
+/// Malformed lines are skipped rather than failing the read: the log is
+/// append-only and a crash mid-write can only damage the last line, which must
+/// not make the whole history unreadable.
+pub fn read_all() -> anyhow::Result<Vec<Entry>> {
+    let Some(path) = history_path() else {
+        anyhow::bail!("no data directory available");
+    };
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.into()),
+    };
+    Ok(text.lines().filter_map(parse_line).collect())
+}
+
+/// Parses one log line.
+///
+/// Hand-rolled rather than pulling in a JSON parser for four fields, matching
+/// the writer. Deliberately forgiving: anything it cannot understand is skipped.
+fn parse_line(line: &str) -> Option<Entry> {
+    let field = |key: &str| -> Option<&str> {
+        let at = line.find(&format!("\"{key}\":"))? + key.len() + 3;
+        Some(line[at..].trim_start())
+    };
+
+    let timestamp = field("timestamp")?
+        .split(|c: char| !c.is_ascii_digit() && c != '-')
+        .next()?
+        .parse()
+        .ok()?;
+    let operation = field("operation")?
+        .strip_prefix('"')?
+        .split('"')
+        .next()?
+        .to_string();
+    let success = field("success")?.starts_with("true");
+    let snapshot = field("snapshot")
+        .filter(|v| v.starts_with('"'))
+        .and_then(|v| v.strip_prefix('"'))
+        .and_then(|v| v.split('"').next())
+        .map(|s| s.to_string());
+
+    // Packages are `{"name":"x","version":"y"}` objects in an array.
+    let mut packages = Vec::new();
+    let mut rest = line;
+    while let Some(i) = rest.find("{\"name\":\"") {
+        rest = &rest[i + 9..];
+        let Some(name) = rest.split('"').next() else {
+            break;
+        };
+        let Some(vi) = rest.find("\"version\":\"") else {
+            break;
+        };
+        // `"version":"` is 11 bytes, not 12 — an off-by-one here silently
+        // truncates the first digit of every version, which then fails to match
+        // any cached package file.
+        let after = &rest[vi + 11..];
+        let Some(version) = after.split('"').next() else {
+            break;
+        };
+        packages.push((name.to_string(), version.to_string()));
+        rest = after;
+    }
+
+    Some(Entry {
+        timestamp,
+        operation,
+        packages,
+        success,
+        snapshot,
+    })
+}
+
 /// Locates the cached package file for an exact version, if it survived
 /// `paccache`.
 pub fn cached_package(name: &str, version: &str) -> Option<PathBuf> {
@@ -153,6 +228,45 @@ mod tests {
         assert!(!j.contains('\n'));
         assert!(j.contains("\\\"quoted\\\""));
         assert!(j.contains("\\n"));
+    }
+
+    #[test]
+    fn a_written_entry_reads_back_identically() {
+        let e = entry();
+        let back = parse_line(&e.to_json()).expect("should parse");
+        assert_eq!(back.timestamp, e.timestamp);
+        assert_eq!(back.operation, e.operation);
+        assert_eq!(back.success, e.success);
+        assert_eq!(back.snapshot, e.snapshot);
+        assert_eq!(back.packages, e.packages);
+    }
+
+    #[test]
+    fn multiple_packages_round_trip() {
+        let mut e = entry();
+        e.packages = vec![
+            ("godot".into(), "4.7.1-1.1".into()),
+            ("embree".into(), "4.4.1-1.1".into()),
+        ];
+        let back = parse_line(&e.to_json()).unwrap();
+        assert_eq!(back.packages, e.packages);
+    }
+
+    #[test]
+    fn a_failed_entry_reads_back_as_failed() {
+        let mut e = entry();
+        e.success = false;
+        e.snapshot = None;
+        let back = parse_line(&e.to_json()).unwrap();
+        assert!(!back.success);
+        assert_eq!(back.snapshot, None);
+    }
+
+    #[test]
+    fn garbage_lines_are_skipped_not_fatal() {
+        assert!(parse_line("").is_none());
+        assert!(parse_line("{not json").is_none());
+        assert!(parse_line("{\"timestamp\":1}").is_none());
     }
 
     #[test]
