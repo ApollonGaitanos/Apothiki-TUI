@@ -36,7 +36,7 @@ pub fn config_name() -> Option<String> {
         return None;
     }
     let text = String::from_utf8_lossy(&out.stdout);
-    Some(pick_config(&text)?)
+    pick_config(&text)
 }
 
 /// Chooses a config from CSV output, preferring the one covering `/`.
