@@ -6,7 +6,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap};
 use ratatui::Frame;
 
-use super::{Focus, Item, RelationKind, Ui, View};
+use super::removal::Stage;
+use super::{Focus, Item, RelatedRow, RelationKind, Ui, View};
+use crate::ops::safety::Risk;
+use crate::ops::RemovalMode;
 use crate::apps::{Evidence, Source};
 use crate::data::graph::OrphanMode;
 use crate::data::local::Reason;
@@ -46,6 +49,234 @@ pub fn draw(f: &mut Frame, ui: &mut Ui) {
     if ui.show_help {
         draw_help(f, f.area(), ui);
     }
+    if ui.dialog.is_some() {
+        draw_removal(f, f.area(), ui);
+    }
+}
+
+fn centred(area: Rect, w: u16, h: u16) -> Rect {
+    let w = w.min(area.width);
+    let h = h.min(area.height);
+    Rect {
+        x: area.x + (area.width.saturating_sub(w)) / 2,
+        y: area.y + (area.height.saturating_sub(h)) / 2,
+        width: w,
+        height: h,
+    }
+}
+
+/// The removal dialog.
+///
+/// Shows what will happen before asking whether to do it, and names the
+/// *applications* at stake rather than only package names (spec §6.3).
+fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
+    let Some(d) = &ui.dialog else { return };
+    let graph = &ui.state.graph;
+    let popup = centred(area, 86, 28);
+
+    let mut lines: Vec<Line> = Vec::new();
+    let names = d.request.package_names(graph);
+    let title = match &d.stage {
+        Stage::Running => " removing… ",
+        Stage::Done { success: true } => " done ",
+        Stage::Done { success: false } => " failed ",
+        _ => " remove ",
+    };
+
+    match &d.stage {
+        Stage::Confirm | Stage::TypeToConfirm => {
+            lines.push(Line::styled(
+                names.join(", "),
+                Style::default().add_modifier(Modifier::BOLD).fg(ACCENT),
+            ));
+
+            // A blocked removal explains itself and offers nothing. There is no
+            // override, by design (spec §6.1).
+            if let Some(p) = &d.request.blocked_by {
+                lines.push(Line::raw(""));
+                lines.push(Line::styled(p.explain(), Style::default().fg(DANGER)));
+                lines.push(Line::raw(""));
+                lines.push(Line::styled(
+                    "There is no way to force this, and that is deliberate.",
+                    Style::default().fg(DIM),
+                ));
+                lines.push(Line::styled("Esc to close", Style::default().fg(DIM)));
+                render_popup(f, popup, title, lines);
+                return;
+            }
+
+            if d.request.plan.is_blocked() {
+                let who: Vec<&str> = d
+                    .request
+                    .plan
+                    .blockers
+                    .iter()
+                    .map(|(dep, _)| graph.name(*dep))
+                    .take(8)
+                    .collect();
+                lines.push(Line::raw(""));
+                lines.push(Line::styled(
+                    format!("Still required by: {}", who.join(", ")),
+                    Style::default().fg(DANGER),
+                ));
+                lines.push(Line::styled(
+                    "pacman would refuse this removal.",
+                    Style::default().fg(DIM),
+                ));
+                lines.push(Line::styled("Esc to close", Style::default().fg(DIM)));
+                render_popup(f, popup, title, lines);
+                return;
+            }
+
+            lines.push(Line::raw(""));
+            for (i, m) in RemovalMode::ALL.iter().enumerate() {
+                let selected = i == d.mode_index;
+                let marker = if selected { "▸ " } else { "  " };
+                lines.push(Line::styled(
+                    format!("{marker}{}  ({})", m.label(), m.flags()),
+                    if selected {
+                        Style::default().add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(DIM)
+                    },
+                ));
+                if selected {
+                    lines.push(Line::styled(
+                        format!("    {}", m.detail()),
+                        Style::default().fg(DIM),
+                    ));
+                }
+            }
+
+            lines.push(Line::raw(""));
+            let total = d.request.plan.all_removed().len();
+            lines.push(Line::raw(format!(
+                "{total} packages, {} freed",
+                human_size(d.request.plan.freed_bytes)
+            )));
+            if !d.request.apps_lost.is_empty() {
+                lines.push(Line::styled(
+                    format!("Applications removed: {}", d.request.apps_lost.join(", ")),
+                    Style::default().fg(DANGER),
+                ));
+            }
+            if !d.request.plan.optdep_losses.is_empty() {
+                let who: Vec<&str> = d
+                    .request
+                    .plan
+                    .optdep_losses
+                    .iter()
+                    .map(|(dep, _)| graph.name(*dep))
+                    .take(5)
+                    .collect();
+                lines.push(Line::styled(
+                    format!("Silently degrades: {}", who.join(", ")),
+                    Style::default().fg(WARN),
+                ));
+            }
+
+            let risk_colour = match d.request.risk {
+                Risk::Safe => OK,
+                Risk::Caution => WARN,
+                _ => DANGER,
+            };
+            lines.push(Line::raw(""));
+            lines.push(Line::styled(
+                format!(
+                    "[{}] {}",
+                    d.request.risk.symbol(),
+                    super::removal::risk_sentence(d.request.risk, &d.request.apps_lost)
+                ),
+                Style::default().fg(risk_colour),
+            ));
+
+            lines.push(Line::raw(""));
+            lines.push(Line::styled(
+                format!(
+                    "[{}] snapper snapshot first  (Ctrl+S)",
+                    if d.snapshot { "x" } else { " " }
+                ),
+                Style::default().fg(if d.snapshot { OK } else { DIM }),
+            ));
+            lines.push(Line::styled(
+                format!("$ {}", d.request.command_line(graph)),
+                Style::default().fg(DIM),
+            ));
+
+            if matches!(d.stage, Stage::TypeToConfirm) {
+                lines.push(Line::raw(""));
+                lines.push(Line::styled(
+                    format!("Type \"{}\" to confirm:", d.confirm_word),
+                    Style::default().fg(DANGER).add_modifier(Modifier::BOLD),
+                ));
+                lines.push(Line::raw(format!("  {}▏", d.typed)));
+            }
+
+            lines.push(Line::raw(""));
+            lines.push(Line::styled(
+                if d.request.risk.needs_typed_confirmation() && !matches!(d.stage, Stage::TypeToConfirm) {
+                    "↑↓ mode   Enter/→ continue   Esc cancel"
+                } else if matches!(d.stage, Stage::TypeToConfirm) {
+                    "Enter confirm   Esc cancel"
+                } else {
+                    "↑↓ mode   Enter/→ remove   Esc cancel"
+                }
+                .to_string(),
+                Style::default().fg(DIM),
+            ));
+        }
+        Stage::Password => {
+            lines.push(Line::raw("Administrator password required."));
+            lines.push(Line::raw(""));
+            lines.push(Line::raw(format!("  {}▏", "•".repeat(d.password.chars().count()))));
+            lines.push(Line::raw(""));
+            lines.push(Line::styled(
+                "Used only to authorise this operation, then discarded.",
+                Style::default().fg(DIM),
+            ));
+            if let Some(e) = &d.error {
+                lines.push(Line::styled(e.clone(), Style::default().fg(DANGER)));
+            }
+            lines.push(Line::styled("Enter confirm   Esc cancel", Style::default().fg(DIM)));
+        }
+        Stage::Running | Stage::Done { .. } => {
+            for l in d.output.iter().rev().take(20).collect::<Vec<_>>().into_iter().rev() {
+                lines.push(Line::raw(l.clone()));
+            }
+            if let Some(e) = &d.error {
+                lines.push(Line::styled(e.clone(), Style::default().fg(DANGER)));
+            }
+            match d.stage {
+                Stage::Done { success: true } => {
+                    lines.push(Line::styled("Finished.", Style::default().fg(OK)));
+                    lines.push(Line::styled("Esc to close", Style::default().fg(DIM)));
+                }
+                Stage::Done { success: false } => {
+                    lines.push(Line::styled(
+                        "Nothing was changed.",
+                        Style::default().fg(WARN),
+                    ));
+                    lines.push(Line::styled("Esc to close", Style::default().fg(DIM)));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    render_popup(f, popup, title, lines);
+}
+
+fn render_popup(f: &mut Frame, popup: Rect, title: &str, lines: Vec<Line>) {
+    f.render_widget(Clear, popup);
+    f.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(DANGER))
+                .title(title.to_string()),
+        ),
+        popup,
+    );
 }
 
 fn draw_tabs(f: &mut Frame, area: Rect, ui: &Ui) {
@@ -181,7 +412,6 @@ fn draw_detail(f: &mut Frame, area: Rect, ui: &mut Ui) {
     let impact_height = (plan_lines.len() as u16 + 2).clamp(3, 9);
 
     let related_focused = ui.focus == Focus::Related;
-    let related = ui.related();
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -218,37 +448,51 @@ fn draw_detail(f: &mut Frame, area: Rect, ui: &mut Ui) {
 
     // The three relationship kinds are kept visually separate: conflating
     // "depends on" with "required by" is the single most confusing thing a
-    // package tool can do (spec §5.2).
-    let items: Vec<ListItem> = related
+    // package tool can do (spec §5.2). The removal action sits above them.
+    let rows = ui.related_rows();
+    let removable = ui.selected_package().is_some();
+    let items: Vec<ListItem> = rows
         .iter()
-        .map(|r| {
-            let colour = match r.kind {
-                RelationKind::DependsOn => Color::Reset,
-                RelationKind::RequiredBy => ACCENT,
-                RelationKind::Optional => WARN,
-            };
-            let mut spans = vec![
-                Span::styled(format!("{:<12} ", r.kind.label()), Style::default().fg(colour)),
-                Span::raw(ui.state.graph.name(r.pkg).to_string()),
-            ];
-            if let Some(note) = &r.note {
-                spans.push(Span::styled(
-                    format!("  — {note}"),
-                    Style::default().fg(DIM),
-                ));
+        .map(|row| match row {
+            RelatedRow::RemoveAction => {
+                let (text, colour) = match ui.selected_package() {
+                    Some(p) if ui.denylist.is_protected(p) => {
+                        ("protected — this cannot be removed", DIM)
+                    }
+                    Some(_) => ("Remove this…  (Del)", DANGER),
+                    None => ("no package to remove", DIM),
+                };
+                ListItem::new(Line::styled(
+                    text.to_string(),
+                    Style::default().fg(colour).add_modifier(Modifier::BOLD),
+                ))
             }
-            ListItem::new(Line::from(spans))
+            RelatedRow::Relation(r) => {
+                let colour = match r.kind {
+                    RelationKind::DependsOn => Color::Reset,
+                    RelationKind::RequiredBy => ACCENT,
+                    RelationKind::Optional => WARN,
+                };
+                let mut spans = vec![
+                    Span::styled(format!("{:<12} ", r.kind.label()), Style::default().fg(colour)),
+                    Span::raw(ui.state.graph.name(r.pkg).to_string()),
+                ];
+                if let Some(note) = &r.note {
+                    spans.push(Span::styled(format!("  — {note}"), Style::default().fg(DIM)));
+                }
+                ListItem::new(Line::from(spans))
+            }
         })
         .collect();
 
-    let title = if related.is_empty() {
-        " relationships ".to_string()
-    } else {
-        format!(" relationships ({}) — Tab to walk, Enter to jump ", related.len())
-    };
+    let _ = removable;
+    let title = format!(
+        " relationships ({}) — → to open, ← to go back ",
+        rows.len().saturating_sub(1)
+    );
 
     let mut state = ListState::default();
-    state.select(Some(ui.related_selected.min(related.len().saturating_sub(1))));
+    state.select(Some(ui.related_selected.min(rows.len().saturating_sub(1))));
 
     f.render_stateful_widget(
         List::new(items)
@@ -458,18 +702,21 @@ fn impact_lines(ui: &mut Ui) -> Vec<Line<'static>> {
 }
 
 fn draw_keybar(f: &mut Frame, area: Rect, ui: &Ui) {
-    let hints: Vec<(&str, &str)> = if ui.searching {
+    let hints: Vec<(&str, &str)> = if ui.dialog.is_some() {
+        vec![("↑↓", "mode"), ("Enter", "confirm"), ("Ctrl+S", "snapshot"), ("Esc", "cancel")]
+    } else if ui.searching {
         vec![("Esc", "cancel"), ("Enter", "keep"), ("↑↓", "move")]
     } else {
         let mut h = vec![
             ("F1", "help"),
-            ("F2-F6", "views"),
+            ("1-4", "views"),
             ("Ctrl+F", "search"),
-            ("Tab", "pane"),
-            ("Enter", "jump"),
-            ("Bksp", "back"),
+            ("→", "open"),
+            ("←", "back"),
+            ("Del", "remove"),
         ];
         if ui.view == View::Orphans {
+            h.push(("c", "clean all"));
             h.push((
                 "Space",
                 match ui.orphan_mode {
@@ -506,20 +753,25 @@ fn draw_help(f: &mut Frame, area: Rect, ui: &Ui) {
     let mut lines = vec![
         Line::styled("apothiki — read-only explorer", Style::default().fg(ACCENT)),
         Line::raw(""),
-        Line::raw("F2/F3/F4/F6  Apps / Tools / Dependencies / Orphans"),
+        Line::raw("1 2 3 4        Apps / Tools / Dependencies / Orphans"),
         Line::raw("↑ ↓ PgUp PgDn Home End   move"),
-        Line::raw("Ctrl+F or just type      search"),
-        Line::raw("Tab                      switch pane"),
-        Line::raw("Enter                    jump to related package"),
-        Line::raw("Backspace / Esc          jump back"),
-        Line::raw("Space (Orphans)          toggle -Qdt / -Qdtt"),
-        Line::raw("Ctrl+Q                   quit"),
+        Line::raw("Ctrl+F         search        F5   refresh"),
+        Line::raw("→ or Enter     open: list → relationships → package"),
+        Line::raw("← or Backspace go back"),
+        Line::raw("Del            remove the selected package"),
+        Line::raw("c  (Orphans)   clean up all orphans"),
+        Line::raw("Space (Orphans) toggle -Qdt / -Qdtt"),
+        Line::raw("Ctrl+Q         quit"),
         Line::raw(""),
         Line::styled(
-            "This build performs no removals and never writes",
+            "Removals run through pacman itself, never by writing",
             Style::default().fg(OK),
         ),
-        Line::styled("to the pacman database.", Style::default().fg(OK)),
+        Line::styled(
+            "to its database. Every plan is checked against a",
+            Style::default().fg(OK),
+        ),
+        Line::styled("pacman dry-run before it runs.", Style::default().fg(OK)),
         Line::raw(""),
     ];
     if !ui.enhanced_keys {

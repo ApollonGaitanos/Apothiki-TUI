@@ -9,6 +9,7 @@
 
 mod apps;
 mod data;
+mod ops;
 mod state;
 mod ui;
 mod verify;
@@ -23,6 +24,7 @@ fn main() -> anyhow::Result<()> {
         Some("verify") => run_verify(),
         Some("apps") => run_apps(),
         Some("stats") => stats(),
+        Some("denylist") => denylist_audit(),
         Some("--help" | "-h") => {
             println!(
                 "apo — application-centric package explorer\n\n\
@@ -37,6 +39,50 @@ fn main() -> anyhow::Result<()> {
         }
         _ => run_tui(),
     }
+}
+
+/// Prints what the denylist protects and why.
+///
+/// The denylist makes removals impossible, so it has to be auditable: an
+/// over-broad rule silently turns "cannot remove this" into "cannot remove
+/// anything", which is a failure the user would experience as the tool being
+/// broken rather than careful.
+fn denylist_audit() -> anyhow::Result<()> {
+    let db = std::sync::Arc::new(LocalDb::load(LocalDb::DEFAULT_ROOT)?);
+    let g = Graph::build(db);
+    let d = ops::safety::Denylist::build(&g);
+
+    let total = g.len();
+    println!(
+        "{} of {total} packages protected ({:.0}%)",
+        d.len(),
+        d.len() as f64 / total as f64 * 100.0
+    );
+
+    let mut direct: Vec<&str> = Vec::new();
+    for i in 0..total as u32 {
+        if matches!(
+            d.protection(i),
+            Some(ops::safety::Protection::Direct(_))
+        ) {
+            direct.push(g.name(i));
+        }
+    }
+    println!("\n{} protected directly:", direct.len());
+    for n in &direct {
+        println!("  {n}");
+    }
+
+    if let Some(name) = std::env::args().nth(2) {
+        match g.index_of(&name) {
+            Some(i) => match d.protection(i) {
+                Some(p) => println!("\n{name}: {}", p.explain()),
+                None => println!("\n{name}: removable"),
+            },
+            None => println!("\n{name}: not installed"),
+        }
+    }
+    Ok(())
 }
 
 /// Refuses to start as root.

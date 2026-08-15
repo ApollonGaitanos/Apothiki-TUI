@@ -8,6 +8,7 @@
 //! The key hint bar is always visible. Discoverability *is* the noob protection
 //! the spec asks for; a hidden binding may as well not exist.
 
+pub mod removal;
 pub mod render;
 pub mod term;
 
@@ -18,7 +19,10 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crate::apps::Source;
 use crate::data::graph::{OrphanMode, PkgIdx, RemovalPlan};
 use crate::data::local::Reason;
+use crate::ops::safety::Denylist;
+use crate::ops::{RemovalMode, RemovalRequest};
 use crate::state::SystemState;
+use removal::{RemovalDialog, Stage};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum View {
@@ -31,12 +35,16 @@ pub enum View {
 impl View {
     pub const ALL: [View; 4] = [View::Apps, View::Tools, View::Dependencies, View::Orphans];
 
+    /// Titles carry their key, because the hint bar is the discoverability
+    /// mechanism. Views moved to the number row so plain typing stays free for
+    /// other uses and the F-keys keep their conventional meanings (F1 help,
+    /// F5 refresh); F2-F6 remain as undocumented aliases.
     pub fn title(&self) -> &'static str {
         match self {
-            View::Apps => "F2 Apps",
-            View::Tools => "F3 Tools",
-            View::Dependencies => "F4 Dependencies",
-            View::Orphans => "F6 Orphans",
+            View::Apps => "1 Apps",
+            View::Tools => "2 Tools",
+            View::Dependencies => "3 Dependencies",
+            View::Orphans => "4 Orphans",
         }
     }
 }
@@ -57,6 +65,17 @@ pub enum Focus {
     List,
     /// The related-packages list in the detail pane, used to walk the graph.
     Related,
+}
+
+/// A row in the relationships pane.
+///
+/// The removal action sits at index 0, above the dependencies, so that pressing
+/// Up from the first relationship lands on it.
+#[derive(Debug, Clone)]
+pub enum RelatedRow {
+    /// "Remove this…" — opens the removal dialog.
+    RemoveAction,
+    Relation(Related),
 }
 
 /// One entry in the detail pane's related-packages list.
@@ -115,6 +134,16 @@ pub struct Ui {
     /// Rows for the current view and query, rebuilt when either changes.
     rows: Vec<Item>,
     pub enhanced_keys: bool,
+    /// Packages that may never be removed, with the reason (spec §6.1).
+    pub denylist: Denylist,
+    /// The removal dialog, when open. While it is open it takes every key.
+    pub dialog: Option<RemovalDialog>,
+    /// Package names backing a visible application, for risk assessment.
+    app_package_names: std::collections::HashSet<String>,
+    /// package name → the applications it backs, for naming what would be lost.
+    apps_named_by_package: HashMap<String, Vec<String>>,
+    /// Set after a removal completes, so the next tick can reload.
+    pub needs_reload: bool,
 }
 
 impl Ui {
@@ -123,6 +152,23 @@ impl Ui {
         for (i, app) in state.catalog.apps.iter().enumerate() {
             for p in &app.packages {
                 apps_by_package.entry(p.clone()).or_default().push(i);
+            }
+        }
+
+        let denylist = Denylist::build(&state.graph);
+        let app_package_names: std::collections::HashSet<String> = state
+            .catalog
+            .apps
+            .iter()
+            .flat_map(|a| a.packages.iter().cloned())
+            .collect();
+        let mut apps_named_by_package: HashMap<String, Vec<String>> = HashMap::new();
+        for app in &state.catalog.apps {
+            for p in &app.packages {
+                apps_named_by_package
+                    .entry(p.clone())
+                    .or_default()
+                    .push(app.name.clone());
             }
         }
 
@@ -143,6 +189,11 @@ impl Ui {
             orphan_mode: OrphanMode::Conservative,
             rows: Vec::new(),
             enhanced_keys,
+            denylist,
+            dialog: None,
+            app_package_names,
+            apps_named_by_package,
+            needs_reload: false,
         };
         ui.rebuild_rows();
         ui
@@ -313,7 +364,9 @@ impl Ui {
     fn move_selection(&mut self, delta: isize, page: usize) {
         let len = match self.focus {
             Focus::List => self.rows.len(),
-            Focus::Related => self.related().len(),
+            // Counts the removal action too, so Up from the first relationship
+            // reaches it.
+            Focus::Related => self.related_rows().len(),
         };
         if len == 0 {
             return;
@@ -380,7 +433,230 @@ impl Ui {
         self.rebuild_rows();
     }
 
+    /// Rows of the relationships pane: the removal action, then relationships.
+    pub fn related_rows(&self) -> Vec<RelatedRow> {
+        let mut rows = vec![RelatedRow::RemoveAction];
+        rows.extend(self.related().into_iter().map(RelatedRow::Relation));
+        rows
+    }
+
+    /// Opens the removal dialog for the current selection.
+    fn open_removal(&mut self) {
+        let Some(pkg) = self.selected_package() else {
+            return;
+        };
+        let request = RemovalRequest::build(
+            &self.state.graph,
+            &self.denylist,
+            vec![pkg],
+            RemovalMode::WithUnusedDeps,
+            &self.app_package_names,
+            &self.apps_named_by_package,
+        );
+        let word = self.state.graph.name(pkg).to_string();
+        self.dialog = Some(RemovalDialog::new(request, word));
+    }
+
+    /// Opens the dialog for a bulk orphan cleanup.
+    fn open_orphan_cleanup(&mut self) {
+        // Only the orphans pacman itself reports (spec decision): our extra
+        // reachability findings stay individually removable.
+        let reported = crate::ops::exec::dry_run(&["-Qdtq".to_string()]).unwrap_or_default();
+        let targets = removal::bulk_orphan_targets(&self.state.graph, &reported);
+        if targets.is_empty() {
+            return;
+        }
+        let request = RemovalRequest::build(
+            &self.state.graph,
+            &self.denylist,
+            targets,
+            RemovalMode::WithUnusedDeps,
+            &self.app_package_names,
+            &self.apps_named_by_package,
+        );
+        self.dialog = Some(RemovalDialog::new(request, "remove".to_string()));
+    }
+
+    /// Rebuilds the pending request after the mode changes, so the preview
+    /// always describes the mode actually selected.
+    fn refresh_dialog_request(&mut self) {
+        let Some(d) = &self.dialog else { return };
+        let (targets, mode) = (d.request.targets.clone(), d.mode());
+        let request = RemovalRequest::build(
+            &self.state.graph,
+            &self.denylist,
+            targets,
+            mode,
+            &self.app_package_names,
+            &self.apps_named_by_package,
+        );
+        if let Some(d) = &mut self.dialog {
+            d.request = request;
+        }
+    }
+
+    /// Advances the dialog past confirmation: verify against pacman, then
+    /// authenticate, then run.
+    fn confirm_removal(&mut self) {
+        let Some(d) = &self.dialog else { return };
+        if d.request.is_blocked() {
+            return;
+        }
+
+        // Dangerous removals need the name typed before anything else happens.
+        if d.request.risk.needs_typed_confirmation() && !matches!(d.stage, Stage::TypeToConfirm) {
+            if let Some(d) = &mut self.dialog {
+                d.stage = Stage::TypeToConfirm;
+            }
+            return;
+        }
+        if matches!(d.stage, Stage::TypeToConfirm) && !d.confirmation_satisfied() {
+            return;
+        }
+
+        // The last gate: pacman's own answer must match ours.
+        match removal::verify_against_pacman(&self.dialog.as_ref().unwrap().request, &self.state.graph) {
+            Err(e) => {
+                if let Some(d) = &mut self.dialog {
+                    d.error = Some(e);
+                    d.stage = Stage::Done { success: false };
+                }
+                return;
+            }
+            Ok(_) => {}
+        }
+
+        match removal::auth_stage() {
+            crate::ops::exec::AuthState::Ready => self.start_removal(),
+            crate::ops::exec::AuthState::NeedsPassword => {
+                if let Some(d) = &mut self.dialog {
+                    d.stage = Stage::Password;
+                    d.password.clear();
+                }
+            }
+            crate::ops::exec::AuthState::Unavailable => {
+                if let Some(d) = &mut self.dialog {
+                    d.error = Some("sudo is not available on this system".into());
+                    d.stage = Stage::Done { success: false };
+                }
+            }
+        }
+    }
+
+    fn start_removal(&mut self) {
+        let Some(d) = &mut self.dialog else { return };
+        let graph = &self.state.graph;
+        let names: Vec<String> = d
+            .request
+            .targets
+            .iter()
+            .map(|&t| graph.name(t).to_string())
+            .collect();
+        // Exact versions, so an offline reinstall from the package cache is
+        // possible later (spec §6.5).
+        let versions: Vec<(String, String)> = d
+            .request
+            .plan
+            .all_removed()
+            .iter()
+            .map(|&p| {
+                let pkg = &graph.db.packages[p as usize];
+                (pkg.name.clone(), pkg.version.clone())
+            })
+            .collect();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        removal::spawn(names, versions, d.mode(), d.snapshot, tx);
+        d.receiver = Some(rx);
+        d.stage = Stage::Running;
+        d.output.clear();
+    }
+
+    /// Drains streamed output. Called once per tick, never during a render.
+    pub fn pump_output(&mut self) {
+        let Some(d) = &mut self.dialog else { return };
+        let Some(rx) = &d.receiver else { return };
+
+        let mut finished: Option<bool> = None;
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                crate::ops::exec::Output::Line(l) => d.output.push(l),
+                crate::ops::exec::Output::Finished { success, .. } => finished = Some(success),
+                crate::ops::exec::Output::Failed(e) => {
+                    d.error = Some(e);
+                    finished = Some(false);
+                }
+            }
+        }
+        if let Some(success) = finished {
+            d.stage = Stage::Done { success };
+            d.receiver = None;
+            if success {
+                self.needs_reload = true;
+            }
+        }
+    }
+
+    fn handle_dialog_key(&mut self, key: KeyEvent) {
+        let Some(d) = &mut self.dialog else { return };
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+        match &d.stage {
+            Stage::Confirm => match key.code {
+                KeyCode::Esc | KeyCode::Left => self.dialog = None,
+                KeyCode::Up => {
+                    d.mode_index = d.mode_index.saturating_sub(1);
+                    self.refresh_dialog_request();
+                }
+                KeyCode::Down => {
+                    d.mode_index = (d.mode_index + 1).min(RemovalMode::ALL.len() - 1);
+                    self.refresh_dialog_request();
+                }
+                KeyCode::Char('s') if ctrl => d.snapshot = !d.snapshot,
+                KeyCode::Enter | KeyCode::Right => self.confirm_removal(),
+                _ => {}
+            },
+            Stage::TypeToConfirm => match key.code {
+                KeyCode::Esc => self.dialog = None,
+                KeyCode::Backspace => {
+                    d.typed.pop();
+                }
+                KeyCode::Char(c) if !ctrl => d.typed.push(c),
+                KeyCode::Enter => self.confirm_removal(),
+                _ => {}
+            },
+            Stage::Password => match key.code {
+                KeyCode::Esc => self.dialog = None,
+                KeyCode::Backspace => {
+                    d.password.pop();
+                }
+                KeyCode::Char(c) if !ctrl => d.password.push(c),
+                KeyCode::Enter => {
+                    let pw = std::mem::take(&mut d.password);
+                    if removal::try_authenticate(pw) {
+                        self.start_removal();
+                    } else if let Some(d) = &mut self.dialog {
+                        d.error = Some("authentication failed".into());
+                    }
+                }
+                _ => {}
+            },
+            // Output is streaming; only quitting the dialog is offered, and
+            // only once it has finished.
+            Stage::Running => {}
+            Stage::Done { .. } => match key.code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Left => self.dialog = None,
+                _ => {}
+            },
+        }
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) {
+        if self.dialog.is_some() {
+            self.handle_dialog_key(key);
+            return;
+        }
+
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
         // The search field swallows most keys while active.
@@ -391,7 +667,7 @@ impl Ui {
                     self.query.clear();
                     self.rebuild_rows();
                 }
-                KeyCode::Enter => self.searching = false,
+                KeyCode::Enter | KeyCode::Down => self.searching = false,
                 KeyCode::Backspace => {
                     self.query.pop();
                     self.rebuild_rows();
@@ -400,8 +676,6 @@ impl Ui {
                     self.query.push(c);
                     self.rebuild_rows();
                 }
-                KeyCode::Up => self.move_selection(-1, 1),
-                KeyCode::Down => self.move_selection(1, 1),
                 _ => {}
             }
             return;
@@ -417,30 +691,30 @@ impl Ui {
             KeyCode::Char('q') if ctrl => self.should_quit = true,
             KeyCode::Char('c') if ctrl => self.should_quit = true,
             KeyCode::F(1) => self.show_help = true,
+
+            // Views on the number row. F-keys kept as aliases.
+            KeyCode::Char('1') => self.switch_view(View::Apps),
+            KeyCode::Char('2') => self.switch_view(View::Tools),
+            KeyCode::Char('3') => self.switch_view(View::Dependencies),
+            KeyCode::Char('4') => self.switch_view(View::Orphans),
             KeyCode::F(2) => self.switch_view(View::Apps),
             KeyCode::F(3) => self.switch_view(View::Tools),
             KeyCode::F(4) => self.switch_view(View::Dependencies),
             KeyCode::F(6) => self.switch_view(View::Orphans),
-            KeyCode::F(5) => {} // Refresh lands with the background reload.
+            KeyCode::F(5) => self.needs_reload = true,
 
+            // Search is explicit now: typing no longer starts it, so the number
+            // row stays available for view switching.
             KeyCode::Char('f') if ctrl => {
                 self.searching = true;
                 self.query.clear();
             }
-            // Typing in a list view starts a search, as the spec suggests.
-            KeyCode::Char(c) if !ctrl && !c.is_whitespace() => {
-                self.searching = true;
-                self.query.clear();
-                self.query.push(c);
-                self.rebuild_rows();
-            }
 
-            KeyCode::Tab => {
-                self.focus = match self.focus {
-                    Focus::List if !self.related().is_empty() => Focus::Related,
-                    _ => Focus::List,
-                };
-            }
+            KeyCode::Delete => self.open_removal(),
+            // Bulk orphan cleanup, offered only where it makes sense.
+            KeyCode::Char('c') if self.view == View::Orphans => self.open_orphan_cleanup(),
+
+            KeyCode::Tab => self.toggle_focus(),
             KeyCode::Up => self.move_selection(-1, 1),
             KeyCode::Down => self.move_selection(1, 1),
             KeyCode::PageUp => self.move_selection(-1, 10),
@@ -448,25 +722,17 @@ impl Ui {
             KeyCode::Home => self.move_selection(-1, usize::MAX / 4),
             KeyCode::End => self.move_selection(1, usize::MAX / 4),
 
-            KeyCode::Enter => {
-                if self.focus == Focus::Related {
-                    if let Some(r) = self.related().get(self.related_selected) {
-                        let pkg = r.pkg;
-                        self.jump_to(pkg);
-                    }
-                }
-            }
-            KeyCode::Backspace => {
-                self.go_back();
-            }
+            // Right/Enter descends: list → relationships → the selected package.
+            KeyCode::Right | KeyCode::Enter => self.descend(),
+            // Left/Backspace ascends: relationships → list → wherever we came from.
+            KeyCode::Left | KeyCode::Backspace => self.ascend(),
+
             KeyCode::Esc => {
                 if !self.query.is_empty() {
                     self.query.clear();
                     self.rebuild_rows();
-                } else if self.focus == Focus::Related {
-                    self.focus = Focus::List;
                 } else {
-                    self.go_back();
+                    self.ascend();
                 }
             }
 
@@ -480,6 +746,46 @@ impl Ui {
                 self.rebuild_rows();
             }
             _ => {}
+        }
+    }
+
+    fn toggle_focus(&mut self) {
+        self.focus = match self.focus {
+            Focus::List => {
+                self.related_selected = 1.min(self.related_rows().len().saturating_sub(1));
+                Focus::Related
+            }
+            Focus::Related => Focus::List,
+        };
+    }
+
+    /// Right / Enter: move one step deeper.
+    fn descend(&mut self) {
+        match self.focus {
+            Focus::List => {
+                // Land on the first relationship rather than the removal action,
+                // so descending never puts a destructive option under the cursor.
+                self.related_selected = 1.min(self.related_rows().len().saturating_sub(1));
+                self.focus = Focus::Related;
+            }
+            Focus::Related => match self.related_rows().get(self.related_selected) {
+                Some(RelatedRow::RemoveAction) => self.open_removal(),
+                Some(RelatedRow::Relation(r)) => {
+                    let pkg = r.pkg;
+                    self.jump_to(pkg);
+                }
+                None => {}
+            },
+        }
+    }
+
+    /// Left / Backspace: move one step back out.
+    fn ascend(&mut self) {
+        match self.focus {
+            Focus::Related => self.focus = Focus::List,
+            Focus::List => {
+                self.go_back();
+            }
         }
     }
 
@@ -527,9 +833,15 @@ mod tests {
     #[test]
     fn view_titles_carry_their_binding() {
         // The hint bar is the discoverability mechanism; a view whose key is not
-        // shown may as well not have one.
-        for v in View::ALL {
-            assert!(v.title().starts_with('F'), "{:?}", v.title());
+        // shown may as well not have one. Views live on the number row so the
+        // F-keys keep their conventional meanings (F1 help, F5 refresh).
+        for (i, v) in View::ALL.iter().enumerate() {
+            let expected = char::from_digit(i as u32 + 1, 10).unwrap();
+            assert!(
+                v.title().starts_with(expected),
+                "{:?} should start with {expected}",
+                v.title()
+            );
         }
     }
 
