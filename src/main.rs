@@ -26,6 +26,7 @@ fn main() -> anyhow::Result<()> {
         Some("stats") => stats(),
         Some("denylist") => denylist_audit(),
         Some("icon") => icon_probe(),
+        Some("doctor") => doctor(),
         Some("--help" | "-h") => {
             println!(
                 "apo — application-centric package explorer\n\n\
@@ -40,6 +41,64 @@ fn main() -> anyhow::Result<()> {
         }
         _ => run_tui(),
     }
+}
+
+/// Checks everything the removal pipeline depends on, without removing anything.
+///
+/// Exists because the pipeline's failures land at the worst moment — after the
+/// user has typed their password — and several of them are environmental rather
+/// than logical. A wrongly-parsed snapper config produced exactly that: an
+/// unexplained abort right after authentication.
+fn doctor() -> anyhow::Result<()> {
+    let ok = |b: bool| if b { "ok  " } else { "FAIL" };
+
+    println!("privilege escalation");
+    let auth = ops::exec::check_auth();
+    println!("  {} sudo present, auth state: {auth:?}", ok(auth != ops::exec::AuthState::Unavailable));
+
+    println!("\nsnapshots");
+    match ops::snapshot::config_name() {
+        Some(c) => {
+            // A config name containing whitespace or table decoration means the
+            // parser is reading the human-readable table, not the data.
+            let clean = !c.contains(char::is_whitespace) && !c.contains('│');
+            println!("  {} snapper config: {c:?}", ok(clean));
+            if !clean {
+                println!("      ^ this is not a real config name; snapshots would fail");
+            }
+        }
+        None => println!("  --   no snapper config (snapshots will be skipped)"),
+    }
+
+    println!("\npacman");
+    let dry = ops::exec::dry_run(&["-Qdtq".to_string()]);
+    println!("  {} read-only pacman queries", ok(dry.is_ok()));
+    println!(
+        "  {} package cache readable ({} files)",
+        ok(std::fs::read_dir("/var/cache/pacman/pkg").is_ok()),
+        std::fs::read_dir("/var/cache/pacman/pkg")
+            .map(|d| d.count())
+            .unwrap_or(0)
+    );
+    println!(
+        "  {} database not locked",
+        ok(!state::is_db_locked())
+    );
+
+    println!("\nundo");
+    match ops::restore::last_undoable() {
+        Some(e) => {
+            let plan = ops::restore::plan_from(&e);
+            println!(
+                "  {} last removal ({} packages) is restorable",
+                ok(plan.is_complete()),
+                e.packages.len()
+            );
+        }
+        None => println!("  --   no removal recorded yet"),
+    }
+
+    Ok(())
 }
 
 /// Resolves and decodes one icon, reporting where it stopped.

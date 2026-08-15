@@ -402,13 +402,14 @@ pub fn auth_stage() -> AuthState {
     exec::check_auth()
 }
 
-/// Validates a typed password, consuming it.
-pub fn try_authenticate(password: String) -> bool {
+/// Validates a typed password, consuming it. Returns sudo's own message on
+/// failure rather than a generic one.
+pub fn try_authenticate(password: String) -> Result<(), String> {
     let secret = Secret::new(password);
     if secret.is_empty() {
-        return false;
+        return Err("no password entered".into());
     }
-    exec::authenticate(&secret).unwrap_or(false)
+    exec::authenticate(&secret)
 }
 
 /// Human wording for a risk tier, shown above the confirmation.

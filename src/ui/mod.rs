@@ -509,6 +509,22 @@ impl Ui {
     /// Opens the removal dialog for the current selection.
     fn open_removal(&mut self) {
         let Some(pkg) = self.selected_package() else {
+            // No pacman package backs this. Saying so is essential: a Delete
+            // that silently does nothing is indistinguishable from the tool
+            // being broken, which is exactly how it was reported.
+            self.notice = Some(match self.current() {
+                Some(Item::App(i)) => match self.state.catalog.apps[i].source {
+                    Source::Flatpak => {
+                        "this is a Flatpak — removing Flatpaks is not implemented yet".into()
+                    }
+                    Source::AppImage => {
+                        "this is an AppImage — removing AppImages is not implemented yet".into()
+                    }
+                    Source::Steam => "Steam owns this — remove it from your Steam library".into(),
+                    _ => "no pacman package backs this, so there is nothing to remove".into(),
+                },
+                _ => "nothing selected to remove".to_string(),
+            });
             return;
         };
         let request = RemovalRequest::build(
@@ -732,10 +748,13 @@ impl Ui {
                 KeyCode::Char(c) if !ctrl => d.password.push(c),
                 KeyCode::Enter => {
                     let pw = std::mem::take(&mut d.password);
-                    if removal::try_authenticate(pw) {
-                        self.start_removal();
-                    } else if let Some(d) = &mut self.dialog {
-                        d.error = Some("authentication failed".into());
+                    match removal::try_authenticate(pw) {
+                        Ok(()) => self.start_removal(),
+                        Err(why) => {
+                            if let Some(d) = &mut self.dialog {
+                                d.error = Some(why);
+                            }
+                        }
                     }
                 }
                 _ => {}

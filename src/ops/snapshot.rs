@@ -20,26 +20,47 @@ pub fn is_available() -> bool {
 }
 
 /// The snapper config covering `/`, conventionally `root`.
+///
+/// Uses `--machine-readable csv`. The human-readable table separates columns
+/// with `│` (U+2502), **not an ASCII pipe** — splitting on `|` silently yields
+/// the whole row, so the config name became the literal string `root   │ /`,
+/// and the snapshot command built from it failed. Because a failed snapshot
+/// aborts the removal by design, that surfaced as an unexplained error at the
+/// worst possible moment: right after the user typed their password.
 pub fn config_name() -> Option<String> {
-    let out = Command::new("snapper").arg("list-configs").output().ok()?;
+    let out = Command::new("snapper")
+        .args(["--machine-readable", "csv", "list-configs"])
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }
     let text = String::from_utf8_lossy(&out.stdout);
-    let names: Vec<String> = text
-        .lines()
-        .skip(2) // header and separator
-        .filter_map(|l| l.split('|').next())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
+    Some(pick_config(&text)?)
+}
 
-    // `root` covers `/`, which is what a package removal touches. Any other
-    // config is a fallback rather than a guess at the right subvolume.
-    if names.iter().any(|n| n == "root") {
-        return Some("root".to_string());
+/// Chooses a config from CSV output, preferring the one covering `/`.
+fn pick_config(csv: &str) -> Option<String> {
+    let mut names: Vec<(String, String)> = Vec::new();
+
+    for line in csv.lines().skip(1) {
+        let mut cols = line.split(',');
+        let name = cols.next()?.trim();
+        let subvolume = cols.next().unwrap_or("").trim();
+        if name.is_empty() {
+            continue;
+        }
+        names.push((name.to_string(), subvolume.to_string()));
     }
-    names.into_iter().next()
+
+    // The config covering `/` is the one a package removal touches.
+    if let Some((name, _)) = names.iter().find(|(_, sub)| sub == "/") {
+        return Some(name.clone());
+    }
+    if let Some((name, _)) = names.iter().find(|(name, _)| name == "root") {
+        return Some(name.clone());
+    }
+    names.into_iter().next().map(|(name, _)| name)
 }
 
 /// Builds the snapper command for a pre-transaction snapshot.
@@ -74,6 +95,44 @@ mod tests {
         assert!(args.contains(&"pre".to_string()));
         // The description must survive as one argument even with spaces.
         assert_eq!(args.last().unwrap(), "apothiki: remove godot");
+    }
+
+    #[test]
+    fn parses_real_machine_readable_output() {
+        // Exactly what `snapper --machine-readable csv list-configs` prints here.
+        let csv = "config,subvolume\nroot,/\n";
+        assert_eq!(pick_config(csv).as_deref(), Some("root"));
+    }
+
+    #[test]
+    fn prefers_the_config_covering_root() {
+        let csv = "config,subvolume\nhome,/home\nroot,/\n";
+        assert_eq!(pick_config(csv).as_deref(), Some("root"));
+    }
+
+    #[test]
+    fn falls_back_to_the_only_config_when_none_covers_root() {
+        let csv = "config,subvolume\ndata,/data\n";
+        assert_eq!(pick_config(csv).as_deref(), Some("data"));
+    }
+
+    #[test]
+    fn a_config_name_never_contains_table_decoration() {
+        // Regression guard: the human-readable table uses `│` (U+2502), not an
+        // ASCII pipe, so a `split('|')` parser returned "root   │ /" as the
+        // config name and every snapshot attempt failed.
+        let csv = "config,subvolume\nroot,/\n";
+        let name = pick_config(csv).unwrap();
+        assert!(!name.contains('│'), "{name:?}");
+        assert!(!name.contains('|'), "{name:?}");
+        assert!(!name.contains(' '), "{name:?}");
+        assert_eq!(name, "root");
+    }
+
+    #[test]
+    fn empty_output_yields_no_config() {
+        assert_eq!(pick_config(""), None);
+        assert_eq!(pick_config("config,subvolume\n"), None);
     }
 
     #[test]

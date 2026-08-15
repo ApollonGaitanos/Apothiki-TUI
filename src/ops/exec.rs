@@ -87,21 +87,41 @@ pub fn check_auth() -> AuthState {
 ///
 /// `-S` reads from stdin, `-v` validates only, and `-p ''` suppresses the
 /// prompt text we would otherwise have to read past.
-pub fn authenticate(secret: &Secret) -> anyhow::Result<bool> {
+pub fn authenticate(secret: &Secret) -> Result<(), String> {
     let mut child = Command::new("sudo")
         .args(["-S", "-p", "", "-v"])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
+        // Captured, not discarded: sudo explains its own refusals, and
+        // reporting "authentication failed" when it actually said something
+        // specific leaves the user with nothing to act on.
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("could not run sudo: {e}"))?;
 
     if let Some(mut stdin) = child.stdin.take() {
         // The newline is what submits it; without it sudo waits forever.
         let _ = stdin.write_all(secret.0.as_bytes());
         let _ = stdin.write_all(b"\n");
+        // Closing stdin stops sudo retrying against an empty stream.
+        drop(stdin);
     }
 
-    Ok(child.wait()?.success())
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("sudo did not complete: {e}"))?;
+
+    if out.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let detail = stderr
+        .lines()
+        .map(|l| l.trim())
+        .find(|l| !l.is_empty() && !l.contains("try again"))
+        .unwrap_or("incorrect password");
+    Err(detail.to_string())
 }
 
 /// A line of output from a running operation.
