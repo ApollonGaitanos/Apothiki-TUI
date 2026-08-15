@@ -144,6 +144,12 @@ pub struct Ui {
     apps_named_by_package: HashMap<String, Vec<String>>,
     /// Set after a removal completes, so the next tick can reload.
     pub needs_reload: bool,
+    /// Terminal graphics backend, probed once at startup.
+    pub picker: Option<ratatui_image::picker::Picker>,
+    /// Decoded icon for the current selection, with the key it was built for.
+    /// Rebuilt only when the selection changes: decoding on every frame would
+    /// put file I/O in the render loop.
+    icon: Option<(String, ratatui_image::protocol::StatefulProtocol)>,
 }
 
 impl Ui {
@@ -194,6 +200,11 @@ impl Ui {
             app_package_names,
             apps_named_by_package,
             needs_reload: false,
+            // Queries the terminal for its graphics capability. Falls back to
+            // unicode half-blocks when there is none, which is the expected
+            // path in Konsole without sixel enabled.
+            picker: ratatui_image::picker::Picker::from_query_stdio().ok(),
+            icon: None,
         };
         ui.rebuild_rows();
         ui
@@ -433,6 +444,36 @@ impl Ui {
         self.rebuild_rows();
     }
 
+    /// The decoded icon for the current selection, if any.
+    ///
+    /// Cached against the selection key so a redraw never touches the disk.
+    pub fn icon(&mut self) -> Option<&mut ratatui_image::protocol::StatefulProtocol> {
+        let (key, name) = match self.current() {
+            Some(Item::App(i)) => {
+                let a = &self.state.catalog.apps[i];
+                (format!("app:{}", a.name), a.icon.clone())
+            }
+            Some(Item::Tool(i)) => {
+                let a = &self.state.catalog.tools[i];
+                (format!("tool:{}", a.name), a.icon.clone())
+            }
+            _ => return None,
+        };
+
+        if self.icon.as_ref().map(|(k, _)| k.as_str()) != Some(key.as_str()) {
+            self.icon = None;
+            if let (Some(picker), Some(icon)) = (self.picker.as_mut(), name) {
+                if let Some(decoded) = crate::apps::icon::resolve(Some(&icon)) {
+                    let proto = picker.new_resize_protocol(image::DynamicImage::ImageRgba8(
+                        decoded.rgba,
+                    ));
+                    self.icon = Some((key, proto));
+                }
+            }
+        }
+        self.icon.as_mut().map(|(_, p)| p)
+    }
+
     /// Rows of the relationships pane: the removal action, then relationships.
     pub fn related_rows(&self) -> Vec<RelatedRow> {
         let mut rows = vec![RelatedRow::RemoveAction];
@@ -515,15 +556,12 @@ impl Ui {
         }
 
         // The last gate: pacman's own answer must match ours.
-        match removal::verify_against_pacman(&self.dialog.as_ref().unwrap().request, &self.state.graph) {
-            Err(e) => {
-                if let Some(d) = &mut self.dialog {
-                    d.error = Some(e);
-                    d.stage = Stage::Done { success: false };
-                }
-                return;
+        if let Err(e) = removal::verify_against_pacman(&self.dialog.as_ref().unwrap().request, &self.state.graph) {
+            if let Some(d) = &mut self.dialog {
+                d.error = Some(e);
+                d.stage = Stage::Done { success: false };
             }
-            Ok(_) => {}
+            return;
         }
 
         match removal::auth_stage() {
@@ -803,6 +841,11 @@ impl Ui {
 
 /// Runs the UI until the user quits.
 pub fn run(state: SystemState) -> anyhow::Result<()> {
+    // Warm the icon index off the render loop. It is only needed for entries
+    // the fast path cannot place, but building it costs ~600 ms, and paying
+    // that on the first arrow key over a Steam shortcut is a visible stall.
+    std::thread::spawn(crate::apps::icon::warm_index);
+
     let (mut terminal, guard) = term::init()?;
     let mut ui = Ui::new(state, guard.enhanced_keys);
 

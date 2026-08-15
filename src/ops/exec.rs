@@ -175,7 +175,7 @@ pub fn dry_run(args: &[String]) -> anyhow::Result<Vec<String>> {
     if !out.status.success() {
         anyhow::bail!(
             "{}",
-            String::from_utf8_lossy(&out.stderr).trim().to_string()
+            String::from_utf8_lossy(&out.stderr).trim()
         );
     }
     Ok(String::from_utf8_lossy(&out.stdout)

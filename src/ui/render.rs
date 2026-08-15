@@ -422,16 +422,45 @@ fn draw_detail(f: &mut Frame, area: Rect, ui: &mut Ui) {
         ])
         .split(area);
 
+    // Icon beside the text when the app has one. The block is drawn first so
+    // both halves sit inside one border.
+    let details_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(DIM))
+        .title(" details ");
+    let inner = details_block.inner(chunks[0]);
+    f.render_widget(details_block, chunks[0]);
+
+    let has_icon = ui.icon().is_some();
+    let text_area = if has_icon {
+        let split = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(12), Constraint::Min(10)])
+            .split(inner);
+        if let Some(proto) = ui.icon() {
+            // Height-limited so a tall icon cannot push the text off screen,
+            // and two columns narrower than its cell to leave a gutter — the
+            // half-block renderer fills its rect edge to edge, so without this
+            // the icon runs straight into the app name.
+            let icon_area = Rect {
+                width: split[0].width.saturating_sub(2),
+                height: split[0].height.min(6),
+                ..split[0]
+            };
+            f.render_stateful_widget(
+                ratatui_image::StatefulImage::default(),
+                icon_area,
+                proto,
+            );
+        }
+        split[1]
+    } else {
+        inner
+    };
+
     f.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(DIM))
-                    .title(" details "),
-            ),
-        chunks[0],
+        Paragraph::new(lines).wrap(Wrap { trim: false }),
+        text_area,
     );
 
     f.render_widget(

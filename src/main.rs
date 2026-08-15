@@ -25,6 +25,7 @@ fn main() -> anyhow::Result<()> {
         Some("apps") => run_apps(),
         Some("stats") => stats(),
         Some("denylist") => denylist_audit(),
+        Some("icon") => icon_probe(),
         Some("--help" | "-h") => {
             println!(
                 "apo — application-centric package explorer\n\n\
@@ -39,6 +40,32 @@ fn main() -> anyhow::Result<()> {
         }
         _ => run_tui(),
     }
+}
+
+/// Resolves and decodes one icon, reporting where it stopped.
+///
+/// Icon failures are silent by design in the UI — decoration must never break
+/// the view — which makes them undiagnosable without a way to ask directly.
+fn icon_probe() -> anyhow::Result<()> {
+    let Some(name) = std::env::args().nth(2) else {
+        println!("usage: apo icon <icon-name>");
+        return Ok(());
+    };
+    match apps::icon::find(&name) {
+        None => println!("{name}: no file found"),
+        Some(path) => {
+            println!("{name}: found {}", path.display());
+            match apps::icon::load(&path) {
+                Some(icon) => println!(
+                    "  decoded {}x{}",
+                    icon.rgba.width(),
+                    icon.rgba.height()
+                ),
+                None => println!("  DECODE FAILED"),
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Prints what the denylist protects and why.
