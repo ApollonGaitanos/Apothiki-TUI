@@ -276,24 +276,12 @@ pub fn spawn_restore(plan: crate::ops::restore::RestorePlan, tx: Sender<Output>)
             return;
         }
 
-        let (rtx, rrx) = std::sync::mpsc::channel();
-        exec::run_privileged("pacman", &plan.args(), rtx);
-
-        let mut success = false;
-        for msg in rrx {
-            match msg {
-                Output::Line(l) => {
-                    let _ = tx.send(Output::Line(l));
-                }
-                Output::Finished { success: s, code } => {
-                    success = s;
-                    let _ = tx.send(Output::Finished { success: s, code });
-                }
-                Output::Failed(e) => {
-                    let _ = tx.send(Output::Failed(e));
-                }
-            }
-        }
+        let result = exec::run_privileged("pacman", &plan.args(), &tx);
+        let success = result.success;
+        let _ = tx.send(Output::Finished {
+            success,
+            code: result.code,
+        });
 
         let entry = history::Entry {
             timestamp: std::time::SystemTime::now()
@@ -342,6 +330,9 @@ pub fn spawn(
                 Ok(lines) => {
                     for l in lines {
                         let _ = tx.send(Output::Line(format!("  would remove {l}")));
+                        // Paced so that live streaming is observable in this
+                        // mode; the real path streams at pacman's own rate.
+                        std::thread::sleep(std::time::Duration::from_millis(120));
                     }
                     let _ = tx.send(Output::Finished { success: true, code: Some(0) });
                 }
@@ -357,28 +348,19 @@ pub fn spawn(
         if take_snapshot {
             if let Some(config) = snapshot::config_name() {
                 let desc = format!("apothiki: {} {}", mode.flags(), packages.join(" "));
-                let (stx, srx) = std::sync::mpsc::channel();
                 let args = snapshot::pre_snapshot_args(&config, &desc);
-                exec::run_privileged("snapper", &args, stx);
+                let _ = tx.send(Output::Line("taking snapshot…".into()));
+                let result = exec::run_privileged("snapper", &args, &tx);
 
-                let mut ok = false;
-                for msg in srx {
-                    match msg {
-                        Output::Line(l) => {
-                            let _ = tx.send(Output::Line(format!("snapshot: {l}")));
-                            if l.trim().chars().all(|c| c.is_ascii_digit()) && !l.trim().is_empty()
-                            {
-                                snapshot_id = Some(l.trim().to_string());
-                            }
-                        }
-                        Output::Finished { success, .. } => ok = success,
-                        Output::Failed(e) => {
-                            let _ = tx.send(Output::Line(format!("snapshot failed: {e}")));
-                        }
-                    }
-                }
+                // `--print-number` writes the new snapshot's id on its own line.
+                snapshot_id = result
+                    .lines
+                    .iter()
+                    .map(|l| l.trim())
+                    .find(|l| !l.is_empty() && l.chars().all(|c| c.is_ascii_digit()))
+                    .map(|l| l.to_string());
 
-                if !ok {
+                if !result.success {
                     // The snapshot is the safety net the user opted into. If it
                     // could not be taken, do not proceed as though it had been.
                     let _ = tx.send(Output::Failed(
@@ -391,24 +373,12 @@ pub fn spawn(
             }
         }
 
-        let (rtx, rrx) = std::sync::mpsc::channel();
-        exec::run_privileged("pacman", &mode.args(&packages), rtx);
-
-        let mut success = false;
-        for msg in rrx {
-            match msg {
-                Output::Line(l) => {
-                    let _ = tx.send(Output::Line(l));
-                }
-                Output::Finished { success: s, code } => {
-                    success = s;
-                    let _ = tx.send(Output::Finished { success: s, code });
-                }
-                Output::Failed(e) => {
-                    let _ = tx.send(Output::Failed(e));
-                }
-            }
-        }
+        let result = exec::run_privileged("pacman", &mode.args(&packages), &tx);
+        let success = result.success;
+        let _ = tx.send(Output::Finished {
+            success,
+            code: result.code,
+        });
 
         let entry = history::Entry {
             timestamp: std::time::SystemTime::now()

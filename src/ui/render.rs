@@ -404,6 +404,15 @@ fn draw_tabs(f: &mut Frame, area: Rect, ui: &Ui) {
         .collect();
 
     let selected = View::ALL.iter().position(|v| *v == ui.view).unwrap_or(0);
+    if ui.is_reloading() {
+        // A refresh rescans the whole system; saying so beats a list that
+        // appears frozen.
+        let w = area.width.saturating_sub(14);
+        f.render_widget(
+            Paragraph::new(Line::styled(" refreshing… ", Style::default().fg(OK))),
+            Rect { x: area.x + w, width: 13.min(area.width), ..area },
+        );
+    }
     f.render_widget(
         Tabs::new(titles)
             .select(selected)

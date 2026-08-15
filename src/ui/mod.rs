@@ -149,6 +149,8 @@ pub struct Ui {
     pub notice: Option<String>,
     /// Terminal graphics backend, probed once at startup.
     pub picker: Option<ratatui_image::picker::Picker>,
+    /// In-flight background reload, if any.
+    reload_rx: Option<std::sync::mpsc::Receiver<anyhow::Result<SystemState>>>,
     /// Decoded icon for the current selection, with the key it was built for.
     /// Rebuilt only when the selection changes: decoding on every frame would
     /// put file I/O in the render loop.
@@ -156,18 +158,26 @@ pub struct Ui {
 }
 
 impl Ui {
-    pub fn new(
-        state: SystemState,
-        enhanced_keys: bool,
-        picker: Option<ratatui_image::picker::Picker>,
-    ) -> Self {
+    /// Everything derived from a `SystemState`, rebuilt whenever it is replaced.
+    fn derive(
+        state: &SystemState,
+    ) -> (
+        HashMap<String, Vec<usize>>,
+        Denylist,
+        std::collections::HashSet<String>,
+        HashMap<String, Vec<String>>,
+    ) {
         let mut apps_by_package: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut apps_named_by_package: HashMap<String, Vec<String>> = HashMap::new();
         for (i, app) in state.catalog.apps.iter().enumerate() {
             for p in &app.packages {
                 apps_by_package.entry(p.clone()).or_default().push(i);
+                apps_named_by_package
+                    .entry(p.clone())
+                    .or_default()
+                    .push(app.name.clone());
             }
         }
-
         let denylist = Denylist::build(&state.graph);
         let app_package_names: std::collections::HashSet<String> = state
             .catalog
@@ -175,15 +185,21 @@ impl Ui {
             .iter()
             .flat_map(|a| a.packages.iter().cloned())
             .collect();
-        let mut apps_named_by_package: HashMap<String, Vec<String>> = HashMap::new();
-        for app in &state.catalog.apps {
-            for p in &app.packages {
-                apps_named_by_package
-                    .entry(p.clone())
-                    .or_default()
-                    .push(app.name.clone());
-            }
-        }
+        (
+            apps_by_package,
+            denylist,
+            app_package_names,
+            apps_named_by_package,
+        )
+    }
+
+    pub fn new(
+        state: SystemState,
+        enhanced_keys: bool,
+        picker: Option<ratatui_image::picker::Picker>,
+    ) -> Self {
+        let (apps_by_package, denylist, app_package_names, apps_named_by_package) =
+            Self::derive(&state);
 
         let mut ui = Ui {
             state,
@@ -208,6 +224,7 @@ impl Ui {
             apps_named_by_package,
             needs_reload: false,
             notice: None,
+            reload_rx: None,
             picker,
             icon: None,
         };
@@ -678,6 +695,70 @@ impl Ui {
         d.receiver = Some(rx);
         d.stage = Stage::Running;
         d.output.clear();
+        // The lock is about to be ours; a stale "another pacman is running"
+        // banner over our own operation is worse than no banner.
+        self.state.db_locked = false;
+    }
+
+    /// Starts rebuilding the system snapshot on a background thread.
+    ///
+    /// Reloading is the whole point of F5 and the reason a removed package
+    /// should stop appearing in the list; doing it on the UI thread would stall
+    /// the render loop for the duration of a full rescan.
+    pub fn start_reload(&mut self) {
+        if self.reload_rx.is_some() {
+            return;
+        }
+        self.needs_reload = false;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(SystemState::load());
+        });
+        self.reload_rx = Some(rx);
+        self.notice = Some("refreshing…".into());
+    }
+
+    pub fn is_reloading(&self) -> bool {
+        self.reload_rx.is_some()
+    }
+
+    /// Swaps in a finished reload, preserving the user's place by name.
+    fn finish_reload(&mut self, state: SystemState) {
+        // Remember what was selected so the cursor does not jump to the top of
+        // the list every refresh.
+        let previous = self.current().and_then(|item| match item {
+            Item::App(i) => Some(self.state.catalog.apps[i].name.clone()),
+            Item::Tool(i) => Some(self.state.catalog.tools[i].name.clone()),
+            Item::Package(p) => Some(self.state.graph.name(p).to_string()),
+        });
+
+        let (apps_by_package, denylist, app_package_names, apps_named_by_package) =
+            Self::derive(&state);
+        self.state = state;
+        self.apps_by_package = apps_by_package;
+        self.denylist = denylist;
+        self.app_package_names = app_package_names;
+        self.apps_named_by_package = apps_named_by_package;
+
+        // Anything cached against the old snapshot is now meaningless.
+        self.impact = None;
+        self.icon = None;
+        self.history.clear();
+        self.rebuild_rows();
+
+        if let Some(name) = previous {
+            if let Some(row) = self.rows.iter().position(|item| match item {
+                Item::App(i) => self.state.catalog.apps[*i].name == name,
+                Item::Tool(i) => self.state.catalog.tools[*i].name == name,
+                Item::Package(p) => self.state.graph.name(*p) == name,
+            }) {
+                self.set_selection(row);
+            } else {
+                // It is gone — which after a removal is the correct outcome.
+                let max = self.rows.len().saturating_sub(1);
+                self.set_selection(self.selection().min(max));
+            }
+        }
     }
 
     /// True while a spawned operation is still producing output.
@@ -689,6 +770,27 @@ impl Ui {
 
     /// Drains streamed output. Called once per tick, never during a render.
     pub fn pump_output(&mut self) {
+        // Collect a finished reload first, so a refresh started by a removal
+        // lands as soon as it is ready.
+        if let Some(rx) = &self.reload_rx {
+            match rx.try_recv() {
+                Ok(Ok(state)) => {
+                    self.reload_rx = None;
+                    self.finish_reload(state);
+                    self.notice = None;
+                }
+                Ok(Err(e)) => {
+                    self.reload_rx = None;
+                    self.notice = Some(format!("refresh failed: {e}"));
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.reload_rx = None,
+            }
+        }
+        if self.needs_reload && self.dialog.is_none() {
+            self.start_reload();
+        }
+
         let Some(d) = &mut self.dialog else { return };
         let Some(rx) = &d.receiver else { return };
 
@@ -820,7 +922,7 @@ impl Ui {
             KeyCode::F(3) => self.switch_view(View::Tools),
             KeyCode::F(4) => self.switch_view(View::Dependencies),
             KeyCode::F(6) => self.switch_view(View::Orphans),
-            KeyCode::F(5) => self.needs_reload = true,
+            KeyCode::F(5) => self.start_reload(),
 
             // Search is explicit now: typing no longer starts it, so the number
             // row stays available for view switching.
@@ -1007,7 +1109,10 @@ pub fn run(state: SystemState) -> anyhow::Result<()> {
                 Event::Resize(_, _) => {}
                 _ => {}
             }
-        } else {
+        } else if !ui.operation_running() {
+            // Only when the lock is not ours: during our own removal pacman
+            // holds it, and warning the user that "another pacman is running"
+            // while they watch our removal run is simply wrong.
             ui.state.db_locked = crate::state::is_db_locked();
         }
     }

@@ -139,12 +139,27 @@ pub enum Output {
     Failed(String),
 }
 
-/// Runs a privileged command, streaming its output.
+/// The result of a privileged command.
+pub struct RunResult {
+    pub success: bool,
+    pub code: Option<i32>,
+    /// Every line produced, for callers that need to read a value back out.
+    pub lines: Vec<String>,
+}
+
+/// Runs a privileged command, streaming its output to `tx` as it arrives.
+///
+/// **Streams rather than collects.** The obvious shape — run the command into a
+/// local channel, then forward that channel — does not stream at all: the run
+/// completes before forwarding begins, so the user watches a frozen dialog and
+/// then sees the whole log at once, exactly when it has stopped being useful.
+/// Lines go straight to the caller's channel here, and the summary is returned
+/// rather than sent, so the caller decides when the operation is "finished".
 ///
 /// Uses `sudo -n`, which never prompts: authentication has already happened, so
 /// a failure here means the timestamp expired and the caller should re-auth
 /// rather than hang waiting for input nobody can see.
-pub fn run_privileged(program: &str, args: &[String], tx: Sender<Output>) {
+pub fn run_privileged(program: &str, args: &[String], tx: &Sender<Output>) -> RunResult {
     let mut full: Vec<String> = vec!["-n".into(), program.into()];
     full.extend(args.iter().cloned());
 
@@ -158,35 +173,58 @@ pub fn run_privileged(program: &str, args: &[String], tx: Sender<Output>) {
     let mut child = match child {
         Ok(c) => c,
         Err(e) => {
-            let _ = tx.send(Output::Failed(format!("could not start sudo: {e}")));
-            return;
+            let msg = format!("could not start sudo: {e}");
+            let _ = tx.send(Output::Failed(msg.clone()));
+            return RunResult {
+                success: false,
+                code: None,
+                lines: vec![msg],
+            };
         }
     };
 
+    let mut lines: Vec<String> = Vec::new();
+
+    // stderr is drained on its own thread. Reading the two streams in sequence
+    // deadlocks as soon as one fills its pipe buffer while we are blocked on
+    // the other — and pacman writes its progress to stderr.
+    let err_handle = child.stderr.take().map(|err| {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let mut collected = Vec::new();
+            for line in BufReader::new(err).lines().map_while(Result::ok) {
+                let _ = tx.send(Output::Line(line.clone()));
+                collected.push(line);
+            }
+            collected
+        })
+    });
+
     if let Some(out) = child.stdout.take() {
         for line in BufReader::new(out).lines().map_while(Result::ok) {
-            if tx.send(Output::Line(line)).is_err() {
-                return;
-            }
+            let _ = tx.send(Output::Line(line.clone()));
+            lines.push(line);
         }
     }
-    if let Some(err) = child.stderr.take() {
-        for line in BufReader::new(err).lines().map_while(Result::ok) {
-            if tx.send(Output::Line(line)).is_err() {
-                return;
-            }
+    if let Some(h) = err_handle {
+        if let Ok(collected) = h.join() {
+            lines.extend(collected);
         }
     }
 
     match child.wait() {
-        Ok(status) => {
-            let _ = tx.send(Output::Finished {
-                success: status.success(),
-                code: status.code(),
-            });
-        }
+        Ok(status) => RunResult {
+            success: status.success(),
+            code: status.code(),
+            lines,
+        },
         Err(e) => {
             let _ = tx.send(Output::Failed(e.to_string()));
+            RunResult {
+                success: false,
+                code: None,
+                lines,
+            }
         }
     }
 }
