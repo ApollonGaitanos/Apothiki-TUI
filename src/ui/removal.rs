@@ -21,6 +21,28 @@ use crate::ops::exec::{self, AuthState, Output, Secret};
 use crate::ops::safety::Risk;
 use crate::ops::{history, snapshot, RemovalMode, RemovalRequest};
 
+/// How far the typed confirmation has got.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmState {
+    Empty,
+    /// A correct prefix so far — nothing is wrong yet.
+    Incomplete,
+    /// Diverges from the required name.
+    Wrong,
+    Matches,
+}
+
+impl ConfirmState {
+    pub fn hint(&self, word: &str) -> String {
+        match self {
+            ConfirmState::Empty => format!("type \"{word}\" exactly"),
+            ConfirmState::Incomplete => "keep going…".into(),
+            ConfirmState::Wrong => format!("that does not match \"{word}\""),
+            ConfirmState::Matches => "matches — press Enter to remove".into(),
+        }
+    }
+}
+
 /// Which step of the flow is on screen.
 pub enum Stage {
     /// Choosing a removal mode and reading the impact.
@@ -149,6 +171,23 @@ impl RemovalDialog {
     /// case-insensitive or trimmed match would defeat the point of asking.
     pub fn confirmation_satisfied(&self) -> bool {
         self.typed == self.confirm_word
+    }
+
+    /// How the typed text relates to the required word, for live feedback.
+    ///
+    /// Without this the only signal for a mistyped name is Enter doing
+    /// nothing, which reads as the tool being broken rather than as the user
+    /// having made a typo.
+    pub fn confirmation_state(&self) -> ConfirmState {
+        if self.typed.is_empty() {
+            ConfirmState::Empty
+        } else if self.typed == self.confirm_word {
+            ConfirmState::Matches
+        } else if self.confirm_word.starts_with(&self.typed) {
+            ConfirmState::Incomplete
+        } else {
+            ConfirmState::Wrong
+        }
     }
 
     /// Whether the dialog can proceed from the confirm stage.
@@ -461,6 +500,26 @@ mod tests {
         }
         d.typed = "godot".into();
         assert!(d.confirmation_satisfied());
+    }
+
+    #[test]
+    fn confirmation_state_distinguishes_incomplete_from_wrong() {
+        // A half-typed name is not an error; a wrong one is. Reporting both the
+        // same way trains the user to ignore the message.
+        let mut d = dialog("alacritty".into());
+        d.stage = Stage::TypeToConfirm;
+
+        assert_eq!(d.confirmation_state(), ConfirmState::Empty);
+        d.typed = "ala".into();
+        assert_eq!(d.confirmation_state(), ConfirmState::Incomplete);
+        d.typed = "alax".into();
+        assert_eq!(d.confirmation_state(), ConfirmState::Wrong);
+        d.typed = "Alacritty".into();
+        assert_eq!(d.confirmation_state(), ConfirmState::Wrong);
+        d.typed = "alacritty".into();
+        assert_eq!(d.confirmation_state(), ConfirmState::Matches);
+        d.typed = "alacritty ".into();
+        assert_eq!(d.confirmation_state(), ConfirmState::Wrong);
     }
 
     #[test]

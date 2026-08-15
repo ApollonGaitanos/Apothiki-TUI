@@ -18,6 +18,13 @@
 //!
 //! Nothing here executes without an explicit confirmed request from the UI, and
 //! every plan is checked against a real `pacman --print` dry-run first.
+//!
+//! **No shell is ever involved.** Every command is spawned as
+//! `Command::new(program).args([...])`, which is `execvp` directly — no `sh -c`,
+//! no word splitting, no globbing, no quoting rules. The user's login shell is
+//! therefore irrelevant: fish, bash and zsh behave identically here, and
+//! arguments containing spaces (a snapshot description, a cache path) arrive as
+//! single argv entries without escaping.
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};

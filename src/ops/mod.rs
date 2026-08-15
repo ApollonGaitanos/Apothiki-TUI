@@ -85,8 +85,19 @@ impl RemovalMode {
     }
 
     /// The read-only dry-run form of the same operation.
+    ///
+    /// **`-n` is dropped here.** pacman refuses `--nosave` together with
+    /// `--print` ("may not be used together"), so a purge dry-run errors out
+    /// and aborts the removal. Dropping it is correct rather than a workaround:
+    /// `-n` governs whether *config files* are kept as `.pacsave`, and has no
+    /// effect on which packages are removed — which is the only thing the
+    /// dry-run is asked to confirm.
     pub fn dry_run_args(&self, packages: &[String]) -> Vec<String> {
-        let mut v: Vec<String> = vec![self.flags().to_string(), "--print".to_string()];
+        let flags = match self {
+            RemovalMode::Purge => "-Rs",
+            other => other.flags(),
+        };
+        let mut v: Vec<String> = vec![flags.to_string(), "--print".to_string()];
         v.extend(packages.iter().cloned());
         v
     }
@@ -212,10 +223,30 @@ mod tests {
             RemovalMode::WithUnusedDeps.args(&pkgs),
             ["-Rs", "--noconfirm", "godot"]
         );
+        // The purge dry-run must not carry -n: pacman rejects --nosave with
+        // --print, which aborted every purge before it ever ran.
         assert_eq!(
             RemovalMode::Purge.dry_run_args(&pkgs),
-            ["-Rns", "--print", "godot"]
+            ["-Rs", "--print", "godot"]
         );
+        // The real command still purges.
+        assert_eq!(
+            RemovalMode::Purge.args(&pkgs),
+            ["-Rns", "--noconfirm", "godot"]
+        );
+    }
+
+    #[test]
+    fn no_dry_run_combines_flags_pacman_rejects() {
+        // Guards the whole family: --print is incompatible with --nosave.
+        for m in RemovalMode::ALL {
+            let args = m.dry_run_args(&["x".to_string()]);
+            let flags = &args[0];
+            assert!(
+                !flags.contains('n'),
+                "{flags} with --print is rejected by pacman"
+            );
+        }
     }
 
     #[test]

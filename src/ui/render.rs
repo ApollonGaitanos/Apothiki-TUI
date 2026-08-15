@@ -209,12 +209,28 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
             ));
 
             if matches!(d.stage, Stage::TypeToConfirm) {
+                use super::removal::ConfirmState;
+                let state = d.confirmation_state();
+                let colour = match state {
+                    ConfirmState::Matches => OK,
+                    ConfirmState::Wrong => DANGER,
+                    _ => WARN,
+                };
                 lines.push(Line::raw(""));
                 lines.push(Line::styled(
                     format!("Type \"{}\" to confirm:", d.confirm_word),
                     Style::default().fg(DANGER).add_modifier(Modifier::BOLD),
                 ));
-                lines.push(Line::raw(format!("  {}▏", d.typed)));
+                lines.push(Line::styled(
+                    format!("  {}▏", d.typed),
+                    Style::default().fg(colour),
+                ));
+                // Live feedback: without it, the only signal for a typo is
+                // Enter appearing to do nothing.
+                lines.push(Line::styled(
+                    format!("  {}", state.hint(&d.confirm_word)),
+                    Style::default().fg(colour),
+                ));
             }
 
             lines.push(Line::raw(""));
