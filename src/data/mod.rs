@@ -4,9 +4,11 @@
 //! keeps it honest is that nothing here knows what an "Application" is — that
 //! synthesis happens in `apps/`, on top of the ground truth produced here.
 
+pub mod aur;
 pub mod dep;
 pub mod descfmt;
 pub mod fileindex;
 pub mod graph;
 pub mod local;
+pub mod search;
 pub mod sync;

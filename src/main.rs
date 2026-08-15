@@ -27,6 +27,8 @@ fn main() -> anyhow::Result<()> {
         Some("denylist") => denylist_audit(),
         Some("icon") => icon_probe(),
         Some("doctor") => doctor(),
+        Some("search") => search_probe(),
+        Some("aur-sync") => aur_sync(),
         Some("--help" | "-h") => {
             println!(
                 "apo — application-centric package explorer\n\n\
@@ -41,6 +43,62 @@ fn main() -> anyhow::Result<()> {
         }
         _ => run_tui(),
     }
+}
+
+/// Downloads the AUR package index.
+///
+/// Normally done on a background thread at startup; exposed as a command so the
+/// download can be run and timed deliberately rather than as a side effect.
+fn aur_sync() -> anyhow::Result<()> {
+    println!("downloading the AUR package index (~15 MB)…");
+    let started = std::time::Instant::now();
+    let index = data::aur::AurIndex::fetch()?;
+    println!(
+        "{} packages in {:.1?}, cached to {}",
+        index.len(),
+        started.elapsed(),
+        data::aur::AurIndex::cache_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default()
+    );
+    Ok(())
+}
+
+/// Runs a search from the command line, for checking ranking against the real
+/// corpus rather than fixtures.
+fn search_probe() -> anyhow::Result<()> {
+    let Some(query) = std::env::args().nth(2) else {
+        println!("usage: apo search <query>");
+        return Ok(());
+    };
+
+    let db = LocalDb::load(LocalDb::DEFAULT_ROOT)?;
+    let sync = SyncDb::load(SyncDb::DEFAULT_ROOT)?;
+    let aur = data::aur::AurIndex::load_cached();
+
+    let started = std::time::Instant::now();
+    let mut searcher = data::search::Searcher::new();
+    let hits = searcher.search(&query, Some(&sync), aur.as_ref(), &db, 15);
+    let elapsed = started.elapsed();
+
+    println!(
+        "{} results in {:.1?} over {} repo + {} aur candidates\n",
+        hits.len(),
+        elapsed,
+        sync.packages.len(),
+        aur.as_ref().map(|a| a.len()).unwrap_or(0)
+    );
+    for h in &hits {
+        println!(
+            "{:<24} {:<20} {:<8} {}{}",
+            truncate(&h.name, 23),
+            truncate(&h.source_label(), 19),
+            if h.installed { "installed" } else { "" },
+            truncate(h.description.as_deref().unwrap_or(""), 52),
+            if h.out_of_date { "  [out of date]" } else { "" }
+        );
+    }
+    Ok(())
 }
 
 /// Checks everything the removal pipeline depends on, without removing anything.
