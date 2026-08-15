@@ -229,6 +229,70 @@ pub fn run_privileged(program: &str, args: &[String], tx: &Sender<Output>) -> Ru
     }
 }
 
+/// Runs a command as the current user, streaming its output.
+///
+/// AUR helpers must not run under sudo — they refuse to, and rightly: makepkg
+/// compiles untrusted source, and doing that as root hands a malicious PKGBUILD
+/// the machine. The helper escalates by itself for the final install, which
+/// does not prompt because the sudo timestamp is already warm.
+pub fn run_unprivileged(program: &str, args: &[String], tx: &Sender<Output>) -> RunResult {
+    let child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn();
+
+    let mut child = match child {
+        Ok(c) => c,
+        Err(e) => {
+            let msg = format!("could not start {program}: {e}");
+            let _ = tx.send(Output::Failed(msg.clone()));
+            return RunResult {
+                success: false,
+                code: None,
+                lines: vec![msg],
+            };
+        }
+    };
+
+    let mut lines: Vec<String> = Vec::new();
+    let err_handle = child.stderr.take().map(|err| {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let mut collected = Vec::new();
+            for line in BufReader::new(err).lines().map_while(Result::ok) {
+                let _ = tx.send(Output::Line(line.clone()));
+                collected.push(line);
+            }
+            collected
+        })
+    });
+    if let Some(out) = child.stdout.take() {
+        for line in BufReader::new(out).lines().map_while(Result::ok) {
+            let _ = tx.send(Output::Line(line.clone()));
+            lines.push(line);
+        }
+    }
+    if let Some(h) = err_handle {
+        if let Ok(collected) = h.join() {
+            lines.extend(collected);
+        }
+    }
+
+    match child.wait() {
+        Ok(status) => RunResult {
+            success: status.success(),
+            code: status.code(),
+            lines,
+        },
+        Err(e) => {
+            let _ = tx.send(Output::Failed(e.to_string()));
+            RunResult { success: false, code: None, lines }
+        }
+    }
+}
+
 /// Runs `pacman --print` and returns the packages it would remove.
 ///
 /// **This is the gate before any real removal.** Our in-process simulation is

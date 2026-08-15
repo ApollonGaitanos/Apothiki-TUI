@@ -66,6 +66,7 @@ pub enum Stage {
 pub enum Job {
     Remove(RemovalRequest),
     Restore(crate::ops::restore::RestorePlan),
+    Install(crate::ops::InstallRequest),
 }
 
 impl Job {
@@ -76,14 +77,21 @@ impl Job {
     pub fn as_removal(&self) -> Option<&RemovalRequest> {
         match self {
             Job::Remove(r) => Some(r),
-            Job::Restore(_) => None,
+            _ => None,
         }
     }
 
     pub fn as_restore(&self) -> Option<&crate::ops::restore::RestorePlan> {
         match self {
             Job::Restore(p) => Some(p),
-            Job::Remove(_) => None,
+            _ => None,
+        }
+    }
+
+    pub fn as_install(&self) -> Option<&crate::ops::InstallRequest> {
+        match self {
+            Job::Install(r) => Some(r),
+            _ => None,
         }
     }
 }
@@ -103,6 +111,10 @@ pub struct RemovalDialog {
     pub receiver: Option<Receiver<Output>>,
     /// The exact name the user must type, cached so it cannot drift.
     pub confirm_word: String,
+    /// A fetched PKGBUILD, shown before an AUR install.
+    pub pkgbuild: Option<String>,
+    pub pkgbuild_scroll: u16,
+    pkgbuild_rx: Option<Receiver<anyhow::Result<String>>>,
 }
 
 impl RemovalDialog {
@@ -122,6 +134,9 @@ impl RemovalDialog {
             output: Vec::new(),
             receiver: None,
             confirm_word,
+            pkgbuild: None,
+            pkgbuild_scroll: 0,
+            pkgbuild_rx: None,
         }
     }
 
@@ -139,6 +154,9 @@ impl RemovalDialog {
             output: Vec::new(),
             receiver: None,
             confirm_word: String::new(),
+            pkgbuild: None,
+            pkgbuild_scroll: 0,
+            pkgbuild_rx: None,
         }
     }
 
@@ -157,13 +175,74 @@ impl RemovalDialog {
             Job::Remove(r) => r.is_blocked(),
             // A restore that cannot be completed in full is never offered.
             Job::Restore(p) => !p.is_complete(),
+            Job::Install(r) => {
+                r.source == crate::ops::InstallSource::Aur && r.helper.is_none()
+            }
         }
     }
 
     pub fn needs_typed_confirmation(&self) -> bool {
         match &self.job {
             Job::Remove(r) => r.risk.needs_typed_confirmation(),
-            Job::Restore(_) => false,
+            // Installing adds something; it does not destroy anything, so the
+            // strongest confirmation is reserved for removal.
+            _ => false,
+        }
+    }
+
+    /// Builds an install dialog.
+    pub fn install(request: crate::ops::InstallRequest) -> Self {
+        RemovalDialog {
+            snapshot: false,
+            job: Job::Install(request),
+            stage: Stage::Confirm,
+            mode_index: 0,
+            typed: String::new(),
+            password: String::new(),
+            error: None,
+            output: Vec::new(),
+            receiver: None,
+            confirm_word: String::new(),
+            pkgbuild: None,
+            pkgbuild_scroll: 0,
+            pkgbuild_rx: None,
+        }
+    }
+
+    /// Starts fetching the PKGBUILD for an AUR install.
+    pub fn request_pkgbuild(&mut self) {
+        if self.pkgbuild.is_some() || self.pkgbuild_rx.is_some() {
+            return;
+        }
+        let Some(request) = self.job.as_install() else {
+            return;
+        };
+        if request.source != crate::ops::InstallSource::Aur {
+            return;
+        }
+        let package = request.package.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::data::aur::fetch_pkgbuild(&package));
+        });
+        self.pkgbuild_rx = Some(rx);
+        self.pkgbuild = Some("fetching PKGBUILD…".to_string());
+    }
+
+    /// Collects a fetched PKGBUILD, if one has arrived.
+    pub fn pump_pkgbuild(&mut self) {
+        let Some(rx) = &self.pkgbuild_rx else { return };
+        match rx.try_recv() {
+            Ok(Ok(text)) => {
+                self.pkgbuild = Some(text);
+                self.pkgbuild_rx = None;
+            }
+            Ok(Err(e)) => {
+                self.pkgbuild = Some(format!("could not fetch PKGBUILD: {e}"));
+                self.pkgbuild_rx = None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => self.pkgbuild_rx = None,
         }
     }
 
@@ -258,6 +337,54 @@ pub fn verify_against_pacman(
         ));
     }
     Ok(theirs)
+}
+
+/// Spawns an install on a background thread.
+///
+/// Repository packages go through the same privileged path as everything else.
+/// AUR packages are handed to a helper, which is run **as the user, not under
+/// sudo** — helpers refuse to run as root, and correctly so: makepkg builds
+/// untrusted source, and building it as root is how a malicious PKGBUILD owns
+/// the machine. The helper escalates on its own for the final install step,
+/// which succeeds without prompting because we pre-authenticated.
+pub fn spawn_install(request: crate::ops::InstallRequest, tx: Sender<Output>) {
+    std::thread::spawn(move || {
+        if dry_run_mode() {
+            let _ = tx.send(Output::Line(
+                "APOTHIKI_DRY_RUN is set — nothing will be installed".into(),
+            ));
+            let _ = tx.send(Output::Line(format!("would run: {}", request.command_line())));
+            let _ = tx.send(Output::Finished { success: true, code: Some(0) });
+            return;
+        }
+
+        let result = match request.source {
+            crate::ops::InstallSource::Repo => {
+                exec::run_privileged("pacman", &request.args(), &tx)
+            }
+            crate::ops::InstallSource::Aur => {
+                let helper = request.helper.clone().unwrap_or_else(|| "paru".into());
+                exec::run_unprivileged(&helper, &request.args(), &tx)
+            }
+        };
+
+        let _ = tx.send(Output::Finished {
+            success: result.success,
+            code: result.code,
+        });
+
+        let entry = history::Entry {
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0),
+            operation: "-S".to_string(),
+            packages: vec![(request.package.clone(), request.version.clone())],
+            success: result.success,
+            snapshot: None,
+        };
+        let _ = history::record(&entry);
+    });
 }
 
 /// Spawns a restore on a background thread.

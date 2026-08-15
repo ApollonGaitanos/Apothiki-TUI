@@ -103,6 +103,66 @@ impl RemovalMode {
     }
 }
 
+/// How to install a package.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstallSource {
+    /// From a configured repository, via pacman.
+    Repo,
+    /// From the AUR, via a helper that builds it.
+    Aur,
+}
+
+/// An install the user has asked for but not yet confirmed.
+#[derive(Debug, Clone)]
+pub struct InstallRequest {
+    pub package: String,
+    pub version: String,
+    pub source: InstallSource,
+    /// The AUR helper to drive, when one is needed.
+    pub helper: Option<String>,
+    /// Risk notes to show before confirming.
+    pub warnings: Vec<String>,
+}
+
+impl InstallRequest {
+    pub fn args(&self) -> Vec<String> {
+        vec![
+            "-S".to_string(),
+            "--noconfirm".to_string(),
+            self.package.clone(),
+        ]
+    }
+
+    pub fn command_line(&self) -> String {
+        match self.source {
+            InstallSource::Repo => format!("sudo pacman {}", self.args().join(" ")),
+            InstallSource::Aur => format!(
+                "{} {}",
+                self.helper.clone().unwrap_or_else(|| "paru".into()),
+                self.args().join(" ")
+            ),
+        }
+    }
+}
+
+/// Finds an AUR helper, preferring `paru` (spec §11).
+///
+/// We drive a helper rather than reimplementing AUR builds: `.SRCINFO` parsing,
+/// dependency resolution and makepkg orchestration are explicitly out of scope
+/// (§2), and getting them subtly wrong is worse than not having them.
+pub fn find_aur_helper() -> Option<String> {
+    ["paru", "yay", "pikaur"]
+        .iter()
+        .find(|h| which(h))
+        .map(|h| h.to_string())
+}
+
+fn which(program: &str) -> bool {
+    std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).any(|d| d.join(program).is_file()))
+        .unwrap_or(false)
+}
+
 /// A removal the user has asked for but not yet confirmed.
 pub struct RemovalRequest {
     pub targets: Vec<PkgIdx>,

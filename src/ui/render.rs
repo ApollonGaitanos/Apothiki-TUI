@@ -90,6 +90,14 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
                 draw_restore_confirm(f, popup, plan);
                 return;
             }
+            if let Some(request) = d.job.as_install() {
+                if let Some(text) = &d.pkgbuild {
+                    draw_pkgbuild(f, area, request, text, d.pkgbuild_scroll);
+                } else {
+                    draw_install_confirm(f, popup, request);
+                }
+                return;
+            }
             let Some(req) = d.job.as_removal() else { return };
             let names = req.package_names(graph);
             lines.push(Line::styled(
@@ -287,6 +295,97 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
     render_popup(f, popup, title, lines);
 }
 
+/// The PKGBUILD review pane.
+///
+/// Shown nearly full-screen: a PKGBUILD is a shell script that will run with
+/// the user's privileges, and reviewing it through a letterbox is not
+/// reviewing it.
+fn draw_pkgbuild(
+    f: &mut Frame,
+    area: Rect,
+    request: &crate::ops::InstallRequest,
+    text: &str,
+    scroll: u16,
+) {
+    let popup = centred(area, area.width.saturating_sub(6), area.height.saturating_sub(4));
+    let lines: Vec<Line> = text.lines().map(|l| Line::raw(l.to_string())).collect();
+
+    f.render_widget(Clear, popup);
+    f.render_widget(
+        Paragraph::new(lines).scroll((scroll, 0)).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(WARN))
+                .title(format!(
+                    " PKGBUILD for {} — PgUp/PgDn scroll, P back ",
+                    request.package
+                )),
+        ),
+        popup,
+    );
+}
+
+/// The install dialog.
+///
+/// States the source plainly. The difference between a signed repository build
+/// and a user-submitted PKGBUILD that compiles on your machine is the single
+/// most important thing a newcomer to Arch does not know.
+fn draw_install_confirm(f: &mut Frame, popup: Rect, request: &crate::ops::InstallRequest) {
+    let mut lines: Vec<Line> = vec![Line::styled(
+        format!("{} {}", request.package, request.version),
+        Style::default().add_modifier(Modifier::BOLD).fg(ACCENT),
+    )];
+    lines.push(Line::raw(""));
+    lines.push(field(
+        "source",
+        match request.source {
+            crate::ops::InstallSource::Repo => "repository (signed, reviewed)",
+            crate::ops::InstallSource::Aur => "AUR (built from source)",
+        },
+    ));
+    if let Some(h) = &request.helper {
+        lines.push(field("helper", h));
+    }
+
+    if !request.warnings.is_empty() {
+        lines.push(Line::raw(""));
+        for w in &request.warnings {
+            lines.push(Line::styled(w.clone(), Style::default().fg(WARN)));
+        }
+    }
+
+    if request.source == crate::ops::InstallSource::Aur {
+        lines.push(Line::raw(""));
+        lines.push(Line::styled(
+            "Press P to read the PKGBUILD before installing.",
+            Style::default().fg(ACCENT),
+        ));
+        lines.push(Line::styled(
+            "It is a shell script that runs on your machine.",
+            Style::default().fg(DIM),
+        ));
+    }
+
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        format!("$ {}", request.command_line()),
+        Style::default().fg(DIM),
+    ));
+    lines.push(Line::raw(""));
+
+    let blocked = request.source == crate::ops::InstallSource::Aur && request.helper.is_none();
+    lines.push(Line::styled(
+        if blocked {
+            "Cannot continue without an AUR helper.   Esc to close"
+        } else {
+            "Enter install   Esc cancel"
+        }
+        .to_string(),
+        Style::default().fg(if blocked { DANGER } else { DIM }),
+    ));
+    render_popup(f, popup, " install ", lines);
+}
+
 /// The undo dialog.
 ///
 /// States plainly what can and cannot be brought back: a purge deleted config
@@ -398,6 +497,7 @@ fn draw_tabs(f: &mut Frame, area: Rect, ui: &Ui) {
                     .filter(|p| p.reason == Reason::Dependency)
                     .count(),
                 View::Orphans => ui.state.graph.orphans(ui.orphan_mode).len(),
+                View::Search => ui.results.len(),
             };
             Line::from(format!(" {} ({count}) ", v.title()))
         })
@@ -435,8 +535,15 @@ fn draw_lock_banner(f: &mut Frame, area: Rect) {
 
 fn draw_list(f: &mut Frame, area: Rect, ui: &mut Ui) {
     let focused = ui.focus == Focus::List;
-    let title = if ui.searching || !ui.query.is_empty() {
-        format!(" search: {}▏ ({} matches) ", ui.query, ui.rows().len())
+    let title = if ui.view == View::Search {
+        let state = match ui.aur_state {
+            crate::data::aur::AurState::Downloading => "  (AUR index downloading…)",
+            crate::data::aur::AurState::Failed => "  (AUR unavailable)",
+            _ => "",
+        };
+        format!(" search: {}▏ ({} results){state} ", ui.query, ui.results.len())
+    } else if ui.searching || !ui.query.is_empty() {
+        format!(" filter: {}▏ ({} matches) ", ui.query, ui.rows().len())
     } else {
         format!(" {} ", ui.rows().len())
     };
@@ -496,6 +603,28 @@ fn row_line<'a>(ui: &'a Ui, item: Item) -> Line<'a> {
                     Style::default().fg(DIM),
                 ),
             ])
+        }
+        Item::Result(i) => {
+            let Some(hit) = ui.results.get(i) else {
+                return Line::raw("");
+            };
+            let mut spans = vec![
+                Span::styled(
+                    format!("{:<5} ", if hit.origin == crate::data::search::Origin::Aur { "aur" } else { "repo" }),
+                    Style::default().fg(if hit.origin == crate::data::search::Origin::Aur { WARN } else { DIM }),
+                ),
+                Span::raw(hit.name.clone()),
+            ];
+            if hit.installed {
+                spans.push(Span::styled("  installed", Style::default().fg(OK)));
+            }
+            if hit.out_of_date {
+                spans.push(Span::styled("  out of date", Style::default().fg(DANGER)));
+            }
+            if hit.orphaned {
+                spans.push(Span::styled("  unmaintained", Style::default().fg(WARN)));
+            }
+            Line::from(spans)
         }
     }
 }
@@ -669,10 +798,17 @@ fn draw_detail(f: &mut Frame, area: Rect, ui: &mut Ui) {
 }
 
 fn detail_header(ui: &Ui, item: Item, lines: &mut Vec<Line>) {
+    if let Item::Result(i) = item {
+        if let Some(hit) = ui.results.get(i) {
+            detail_hit(hit, lines);
+        }
+        return;
+    }
+
     let app = match item {
         Item::App(i) => Some(&ui.state.catalog.apps[i]),
         Item::Tool(i) => Some(&ui.state.catalog.tools[i]),
-        Item::Package(_) => None,
+        _ => None,
     };
 
     if let Some(app) = app {
@@ -711,6 +847,51 @@ fn detail_header(ui: &Ui, item: Item, lines: &mut Vec<Line>) {
             ));
         }
         lines.push(Line::raw(""));
+    }
+}
+
+/// Detail for a search result — a package that may not be installed.
+fn detail_hit(hit: &crate::data::search::Hit, lines: &mut Vec<Line>) {
+    lines.push(Line::styled(
+        hit.name.clone(),
+        Style::default().add_modifier(Modifier::BOLD).fg(ACCENT),
+    ));
+    if let Some(d) = &hit.description {
+        lines.push(Line::raw(d.clone()));
+    }
+    lines.push(Line::raw(""));
+    // When it is installed, the package block below repeats version and
+    // description in more detail; repeating them here just pads the pane.
+    if !hit.installed {
+        lines.push(field("version", &hit.version));
+    }
+    lines.push(field("source", &hit.source_label()));
+    lines.push(field(
+        "status",
+        if hit.installed { "installed" } else { "not installed" },
+    ));
+
+    if hit.origin == crate::data::search::Origin::Aur {
+        lines.push(field("votes", &hit.votes.to_string()));
+        lines.push(Line::raw(""));
+        // AUR packages are user-submitted and build from source. Saying so
+        // plainly is the point at which a novice can still decide otherwise.
+        lines.push(Line::styled(
+            "From the AUR: built from source, not reviewed by Arch.",
+            Style::default().fg(WARN),
+        ));
+        if hit.orphaned {
+            lines.push(Line::styled(
+                "Unmaintained — nobody is applying upstream fixes.",
+                Style::default().fg(DANGER),
+            ));
+        }
+        if hit.out_of_date {
+            lines.push(Line::styled(
+                "Flagged out of date.",
+                Style::default().fg(DANGER),
+            ));
+        }
     }
 }
 
@@ -873,6 +1054,15 @@ fn draw_keybar(f: &mut Frame, area: Rect, ui: &Ui) {
             ("Del", "remove"),
             ("Ctrl+Z", "undo"),
         ];
+        if ui.view == View::Search {
+            h = vec![
+                ("F1", "help"),
+                ("1-5", "views"),
+                ("type", "search"),
+                ("→/Enter", "install"),
+                ("Ctrl+Q", "quit"),
+            ];
+        }
         if ui.view == View::Orphans {
             h.push(("c", "clean all"));
             h.push((
@@ -924,7 +1114,7 @@ fn draw_help(f: &mut Frame, area: Rect, ui: &Ui) {
     let mut lines = vec![
         Line::styled("apothiki — read-only explorer", Style::default().fg(ACCENT)),
         Line::raw(""),
-        Line::raw("1 2 3 4        Apps / Tools / Dependencies / Orphans"),
+        Line::raw("1 2 3 4 5      Apps / Tools / Deps / Orphans / Search"),
         Line::raw("↑ ↓ PgUp PgDn Home End   move"),
         Line::raw("Ctrl+F         search        F5   refresh"),
         Line::raw("→ or Enter     open: list → relationships → package"),

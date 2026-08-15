@@ -30,10 +30,18 @@ pub enum View {
     Tools,
     Dependencies,
     Orphans,
+    /// Search and install, across repositories and the AUR.
+    Search,
 }
 
 impl View {
-    pub const ALL: [View; 4] = [View::Apps, View::Tools, View::Dependencies, View::Orphans];
+    pub const ALL: [View; 5] = [
+        View::Apps,
+        View::Tools,
+        View::Dependencies,
+        View::Orphans,
+        View::Search,
+    ];
 
     /// Titles carry their key, because the hint bar is the discoverability
     /// mechanism. Views moved to the number row so plain typing stays free for
@@ -45,7 +53,14 @@ impl View {
             View::Tools => "2 Tools",
             View::Dependencies => "3 Dependencies",
             View::Orphans => "4 Orphans",
+            View::Search => "5 Search",
         }
+    }
+
+    /// The search view is a text field first and a list second, so typing goes
+    /// straight into the query there rather than needing Ctrl+F.
+    pub fn types_to_search(&self) -> bool {
+        matches!(self, View::Search)
     }
 }
 
@@ -57,6 +72,8 @@ pub enum Item {
     /// Index into `catalog.tools`.
     Tool(usize),
     Package(PkgIdx),
+    /// Index into the current search results.
+    Result(usize),
 }
 
 /// Which pane has keyboard focus.
@@ -158,6 +175,17 @@ pub struct Ui {
     pub notice: Option<String>,
     /// Terminal graphics backend, probed once at startup.
     pub picker: Option<ratatui_image::picker::Picker>,
+    /// Repository databases, loaded in the background: ~260 ms that nothing in
+    /// the other views needs on the first frame.
+    pub sync: Option<crate::data::sync::SyncDb>,
+    sync_rx: Option<std::sync::mpsc::Receiver<crate::data::sync::SyncDb>>,
+    /// The AUR package index, downloaded in the background on first use.
+    pub aur: Option<crate::data::aur::AurIndex>,
+    aur_rx: Option<std::sync::mpsc::Receiver<anyhow::Result<crate::data::aur::AurIndex>>>,
+    pub aur_state: crate::data::aur::AurState,
+    searcher: crate::data::search::Searcher,
+    /// Results for the current query, recomputed when it changes.
+    pub results: Vec<crate::data::search::Hit>,
     /// In-flight background reload, if any.
     reload_rx: Option<std::sync::mpsc::Receiver<anyhow::Result<SystemState>>>,
     /// Decoded icon for the current selection, with the key it was built for.
@@ -231,6 +259,13 @@ impl Ui {
             apps_named_by_package,
             needs_reload: false,
             notice: None,
+            sync: None,
+            sync_rx: None,
+            aur: None,
+            aur_rx: None,
+            aur_state: crate::data::aur::AurState::Absent,
+            searcher: crate::data::search::Searcher::new(),
+            results: Vec::new(),
             reload_rx: None,
             picker,
             icon: None,
@@ -294,6 +329,10 @@ impl Ui {
                 .filter(|(_, p)| p.reason == Reason::Dependency && matches(&p.name))
                 .map(|(i, _)| Item::Package(i as u32))
                 .collect(),
+            View::Search => {
+                self.refresh_results();
+                return;
+            }
             View::Orphans => {
                 let mut v: Vec<Item> = self
                     .state
@@ -325,6 +364,12 @@ impl Ui {
             Item::Package(p) => Some(p),
             Item::App(i) => self.package_of(&self.state.catalog.apps[i].packages),
             Item::Tool(i) => self.package_of(&self.state.catalog.tools[i].packages),
+            // A search result is only a local package when it is installed;
+            // otherwise there is nothing on this system to point at.
+            Item::Result(i) => {
+                let hit = self.results.get(i)?;
+                hit.installed.then(|| self.state.graph.index_of(&hit.name))?
+            }
         }
     }
 
@@ -467,6 +512,13 @@ impl Ui {
     }
 
     fn switch_view(&mut self, view: View) {
+        // The query means different things in the two contexts — a filter over
+        // installed things, or a search over everything available — so it does
+        // not carry across.
+        if view.types_to_search() != self.view.types_to_search() {
+            self.query.clear();
+            self.searching = false;
+        }
         self.view = view;
         self.focus = Focus::List;
         self.impact = None;
@@ -561,6 +613,52 @@ impl Ui {
         );
         let word = self.state.graph.name(pkg).to_string();
         self.dialog = Some(RemovalDialog::new(request, word));
+    }
+
+    /// Opens the install dialog for the selected search result.
+    fn open_install(&mut self) {
+        let Some(hit) = self.selected_hit().cloned() else {
+            return;
+        };
+        if hit.installed {
+            self.notice = Some(format!("{} is already installed", hit.name));
+            return;
+        }
+
+        let source = match hit.origin {
+            crate::data::search::Origin::Repo => crate::ops::InstallSource::Repo,
+            crate::data::search::Origin::Aur => crate::ops::InstallSource::Aur,
+        };
+        let helper = if source == crate::ops::InstallSource::Aur {
+            crate::ops::find_aur_helper()
+        } else {
+            None
+        };
+
+        let mut warnings = Vec::new();
+        if source == crate::ops::InstallSource::Aur {
+            warnings.push(
+                "This builds from source. AUR packages are user-submitted and not reviewed."
+                    .to_string(),
+            );
+            if hit.orphaned {
+                warnings.push("Unmaintained: nobody is applying upstream fixes.".into());
+            }
+            if hit.out_of_date {
+                warnings.push("Flagged out of date by users.".into());
+            }
+            if helper.is_none() {
+                warnings.push("No AUR helper found — install paru or yay first.".into());
+            }
+        }
+
+        self.dialog = Some(RemovalDialog::install(crate::ops::InstallRequest {
+            package: hit.name.clone(),
+            version: hit.version.clone(),
+            source,
+            helper,
+            warnings,
+        }));
     }
 
     /// Opens the undo dialog for the most recent removal.
@@ -667,6 +765,16 @@ impl Ui {
     fn start_removal(&mut self) {
         let Some(d) = &mut self.dialog else { return };
 
+        if let Some(request) = d.job.as_install().cloned() {
+            let (tx, rx) = std::sync::mpsc::channel();
+            removal::spawn_install(request, tx);
+            d.receiver = Some(rx);
+            d.stage = Stage::Running;
+            d.output.clear();
+            self.state.db_locked = false;
+            return;
+        }
+
         // Restores take the simpler path: files from the local cache, no
         // snapshot, nothing to reconcile.
         if let Some(plan) = d.job.as_restore().cloned() {
@@ -707,6 +815,60 @@ impl Ui {
         self.state.db_locked = false;
     }
 
+    /// Kicks off the repository and AUR loads. Neither blocks the first frame.
+    pub fn start_background_loads(&mut self) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            if let Ok(db) = crate::data::sync::SyncDb::load(crate::data::sync::SyncDb::DEFAULT_ROOT)
+            {
+                let _ = tx.send(db);
+            }
+        });
+        self.sync_rx = Some(rx);
+
+        // A cached index is used immediately; a download only starts when there
+        // is none or it has aged out. Search over repositories works either way,
+        // so a cold start is degraded rather than blocked.
+        match crate::data::aur::AurIndex::load_cached() {
+            Some(index) if !index.is_stale() => {
+                self.aur = Some(index);
+                self.aur_state = crate::data::aur::AurState::Ready;
+            }
+            cached => {
+                self.aur = cached;
+                self.aur_state = crate::data::aur::AurState::Downloading;
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let _ = tx.send(crate::data::aur::AurIndex::fetch());
+                });
+                self.aur_rx = Some(rx);
+            }
+        }
+    }
+
+    /// Re-runs the search for the current query.
+    fn refresh_results(&mut self) {
+        self.results = self.searcher.search(
+            &self.query,
+            self.sync.as_ref(),
+            self.aur.as_ref(),
+            &self.state.db,
+            200,
+        );
+        self.rows = (0..self.results.len()).map(Item::Result).collect();
+        let max = self.rows.len().saturating_sub(1);
+        if self.selection() > max {
+            self.set_selection(max);
+        }
+    }
+
+    pub fn selected_hit(&self) -> Option<&crate::data::search::Hit> {
+        match self.current()? {
+            Item::Result(i) => self.results.get(i),
+            _ => None,
+        }
+    }
+
     /// Starts rebuilding the system snapshot on a background thread.
     ///
     /// Reloading is the whole point of F5 and the reason a removed package
@@ -737,6 +899,11 @@ impl Ui {
             Item::App(i) => self.state.catalog.apps[i].name.clone(),
             Item::Tool(i) => self.state.catalog.tools[i].name.clone(),
             Item::Package(p) => self.state.graph.name(p).to_string(),
+            Item::Result(i) => self
+                .results
+                .get(i)
+                .map(|h| h.name.clone())
+                .unwrap_or_default(),
         });
 
         let d = Self::derive(&state);
@@ -757,6 +924,7 @@ impl Ui {
                 Item::App(i) => self.state.catalog.apps[*i].name == name,
                 Item::Tool(i) => self.state.catalog.tools[*i].name == name,
                 Item::Package(p) => self.state.graph.name(*p) == name,
+                Item::Result(i) => self.results.get(*i).is_some_and(|h| h.name == name),
             }) {
                 self.set_selection(row);
             } else {
@@ -776,6 +944,9 @@ impl Ui {
 
     /// Drains streamed output. Called once per tick, never during a render.
     pub fn pump_output(&mut self) {
+        if let Some(d) = &mut self.dialog {
+            d.pump_pkgbuild();
+        }
         // Collect a finished reload first, so a refresh started by a removal
         // lands as soon as it is ready.
         if let Some(rx) = &self.reload_rx {
@@ -793,6 +964,34 @@ impl Ui {
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => self.reload_rx = None,
             }
         }
+        if let Some(rx) = &self.sync_rx {
+            if let Ok(db) = rx.try_recv() {
+                self.sync = Some(db);
+                self.sync_rx = None;
+                if self.view == View::Search {
+                    self.refresh_results();
+                }
+            }
+        }
+        if let Some(rx) = &self.aur_rx {
+            match rx.try_recv() {
+                Ok(Ok(index)) => {
+                    self.aur = Some(index);
+                    self.aur_state = crate::data::aur::AurState::Ready;
+                    self.aur_rx = None;
+                    if self.view == View::Search {
+                        self.refresh_results();
+                    }
+                }
+                Ok(Err(_)) => {
+                    self.aur_state = crate::data::aur::AurState::Failed;
+                    self.aur_rx = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.aur_rx = None,
+            }
+        }
+
         if self.needs_reload && self.dialog.is_none() {
             self.start_reload();
         }
@@ -826,6 +1025,20 @@ impl Ui {
 
         match &d.stage {
             Stage::Confirm => match key.code {
+                // PKGBUILD review, for AUR installs only.
+                KeyCode::Char('p') if d.job.as_install().is_some() => {
+                    if d.pkgbuild.is_some() {
+                        d.pkgbuild = None;
+                    } else {
+                        d.request_pkgbuild();
+                    }
+                }
+                KeyCode::PageDown if d.pkgbuild.is_some() => {
+                    d.pkgbuild_scroll = d.pkgbuild_scroll.saturating_add(10)
+                }
+                KeyCode::PageUp if d.pkgbuild.is_some() => {
+                    d.pkgbuild_scroll = d.pkgbuild_scroll.saturating_sub(10)
+                }
                 KeyCode::Esc | KeyCode::Left => self.dialog = None,
                 KeyCode::Up => {
                     d.mode_index = d.mode_index.saturating_sub(1);
@@ -920,6 +1133,17 @@ impl Ui {
             KeyCode::F(1) => self.show_help = true,
 
             // Views on the number row. F-keys kept as aliases.
+            // In the search view the query field is the point, so plain typing
+            // goes to it — including digits, which would otherwise switch views.
+            KeyCode::Char(c) if self.view == View::Search && !ctrl => {
+                self.query.push(c);
+                self.refresh_results();
+            }
+            KeyCode::Backspace if self.view == View::Search && !self.query.is_empty() => {
+                self.query.pop();
+                self.refresh_results();
+            }
+
             KeyCode::Char('1') => self.switch_view(View::Apps),
             KeyCode::Char('2') => self.switch_view(View::Tools),
             KeyCode::Char('3') => self.switch_view(View::Dependencies),
@@ -928,6 +1152,8 @@ impl Ui {
             KeyCode::F(3) => self.switch_view(View::Tools),
             KeyCode::F(4) => self.switch_view(View::Dependencies),
             KeyCode::F(6) => self.switch_view(View::Orphans),
+            KeyCode::Char('5') => self.switch_view(View::Search),
+            KeyCode::F(7) => self.switch_view(View::Search),
             KeyCode::F(5) => self.start_reload(),
 
             // Search is explicit now: typing no longer starts it, so the number
@@ -990,6 +1216,10 @@ impl Ui {
 
     /// Right / Enter: move one step deeper.
     fn descend(&mut self) {
+        if self.view == View::Search && self.focus == Focus::List {
+            self.open_install();
+            return;
+        }
         match self.focus {
             Focus::List => {
                 // Land on the first relationship rather than the removal action,
@@ -1091,6 +1321,7 @@ pub fn run(state: SystemState) -> anyhow::Result<()> {
 
     let (mut terminal, guard) = term::init()?;
     let mut ui = Ui::new(state, guard.enhanced_keys, picker);
+    ui.start_background_loads();
 
     while !ui.should_quit {
         terminal.draw(|f| render::draw(f, &mut ui))?;

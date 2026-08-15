@@ -24,6 +24,13 @@ const MAX_AGE_SECS: u64 = 24 * 60 * 60;
 
 const URL: &str = "https://aur.archlinux.org/packages-meta-ext-v1.json.gz";
 
+/// Identifies this client to the AUR.
+///
+/// Not just politeness: the cgit endpoint answers 502 to the HTTP library's
+/// default agent while serving the same URL to curl, so an explicit,
+/// identifiable agent is what makes PKGBUILD review work at all.
+const USER_AGENT: &str = concat!("apothiki/", env!("CARGO_PKG_VERSION"));
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AurPackage {
     pub name: String,
@@ -100,6 +107,7 @@ impl AurIndex {
     /// Downloads and parses the full package list, then caches it.
     pub fn fetch() -> anyhow::Result<Self> {
         let response = ureq::get(URL)
+            .header("User-Agent", USER_AGENT)
             .call()
             .map_err(|e| anyhow::anyhow!("could not reach the AUR: {e}"))?;
 
@@ -171,6 +179,23 @@ fn now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Fetches a package's PKGBUILD from the AUR.
+///
+/// This is the one review step that matters for the AUR. A PKGBUILD is a shell
+/// script that runs on the user's machine with their privileges, and we pass
+/// `--noconfirm` to the helper, which suppresses *its* review prompt — so if we
+/// do not show it, nobody does.
+pub fn fetch_pkgbuild(package: &str) -> anyhow::Result<String> {
+    let url = format!("https://aur.archlinux.org/cgit/aur.git/plain/PKGBUILD?h={package}");
+    let response = ureq::get(&url)
+        .header("User-Agent", USER_AGENT)
+        .call()
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let mut body = String::new();
+    std::io::Read::read_to_string(&mut response.into_body().into_reader(), &mut body)?;
+    Ok(body)
 }
 
 /// What the UI knows about the AUR index at any moment.
