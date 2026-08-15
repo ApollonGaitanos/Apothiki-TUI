@@ -919,8 +919,9 @@ fn probe_picker() -> Option<ratatui_image::picker::Picker> {
             return Some(p);
         }
     }
-    // Half-blocks need only a cell size to scale against.
-    Some(Picker::from_fontsize(ratatui_image::FontSize::new(8, 16)))
+    // The dedicated half-blocks constructor: no terminal query, so no chance
+    // of consuming a keystroke.
+    Some(Picker::halfblocks())
 }
 
 /// Whether the terminal is one known to implement kitty/sixel/iTerm graphics.
