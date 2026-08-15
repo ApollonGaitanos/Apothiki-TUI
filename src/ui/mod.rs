@@ -517,8 +517,10 @@ impl Ui {
         // not carry across.
         if view.types_to_search() != self.view.types_to_search() {
             self.query.clear();
-            self.searching = false;
         }
+        // The search view opens ready to type; every other view starts in
+        // navigation mode.
+        self.searching = view.types_to_search();
         self.view = view;
         self.focus = Focus::List;
         self.impact = None;
@@ -1099,15 +1101,35 @@ impl Ui {
 
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
-        // The search field swallows most keys while active.
+        // While the query field has focus it takes printable keys — including
+        // digits, which would otherwise switch views. Escape releases it, which
+        // is the only way back to the view keys in the search view.
         if self.searching {
             match key.code {
+                KeyCode::Char('q') if ctrl => self.should_quit = true,
+                KeyCode::Char('c') if ctrl => self.should_quit = true,
+
+                // View switching stays reachable without leaving the field.
+                KeyCode::Tab => self.cycle_view(1),
+                KeyCode::BackTab => self.cycle_view(-1),
+
                 KeyCode::Esc => {
-                    self.searching = false;
-                    self.query.clear();
-                    self.rebuild_rows();
+                    if self.view == View::Search {
+                        // Keep the results; just stop capturing keystrokes.
+                        self.searching = false;
+                    } else {
+                        self.searching = false;
+                        self.query.clear();
+                        self.rebuild_rows();
+                    }
                 }
-                KeyCode::Enter | KeyCode::Down => self.searching = false,
+                KeyCode::Enter => {
+                    if self.view == View::Search {
+                        self.open_install();
+                    } else {
+                        self.searching = false;
+                    }
+                }
                 KeyCode::Backspace => {
                     self.query.pop();
                     self.rebuild_rows();
@@ -1116,6 +1138,10 @@ impl Ui {
                     self.query.push(c);
                     self.rebuild_rows();
                 }
+                KeyCode::Up => self.move_selection(-1, 1),
+                KeyCode::Down => self.move_selection(1, 1),
+                KeyCode::PageUp => self.move_selection(-1, 10),
+                KeyCode::PageDown => self.move_selection(1, 10),
                 _ => {}
             }
             return;
@@ -1133,17 +1159,6 @@ impl Ui {
             KeyCode::F(1) => self.show_help = true,
 
             // Views on the number row. F-keys kept as aliases.
-            // In the search view the query field is the point, so plain typing
-            // goes to it — including digits, which would otherwise switch views.
-            KeyCode::Char(c) if self.view == View::Search && !ctrl => {
-                self.query.push(c);
-                self.refresh_results();
-            }
-            KeyCode::Backspace if self.view == View::Search && !self.query.is_empty() => {
-                self.query.pop();
-                self.refresh_results();
-            }
-
             KeyCode::Char('1') => self.switch_view(View::Apps),
             KeyCode::Char('2') => self.switch_view(View::Tools),
             KeyCode::Char('3') => self.switch_view(View::Dependencies),
@@ -1160,7 +1175,11 @@ impl Ui {
             // row stays available for view switching.
             KeyCode::Char('f') if ctrl => {
                 self.searching = true;
-                self.query.clear();
+                // In the search view this resumes editing the existing query;
+                // elsewhere it starts a fresh filter.
+                if self.view != View::Search {
+                    self.query.clear();
+                }
             }
 
             KeyCode::Delete => self.open_removal(),
@@ -1169,7 +1188,10 @@ impl Ui {
             // Bulk orphan cleanup, offered only where it makes sense.
             KeyCode::Char('c') if self.view == View::Orphans => self.open_orphan_cleanup(),
 
-            KeyCode::Tab => self.toggle_focus(),
+            // Tab walks the views. Pane focus is already covered by Right and
+            // Left, which is a more natural fit for moving deeper and back.
+            KeyCode::Tab => self.cycle_view(1),
+            KeyCode::BackTab => self.cycle_view(-1),
             KeyCode::Up => self.move_selection(-1, 1),
             KeyCode::Down => self.move_selection(1, 1),
             KeyCode::PageUp => self.move_selection(-1, 10),
@@ -1204,6 +1226,18 @@ impl Ui {
         }
     }
 
+    /// Moves to the next or previous view, wrapping around.
+    fn cycle_view(&mut self, delta: isize) {
+        let count = View::ALL.len() as isize;
+        let current = View::ALL
+            .iter()
+            .position(|v| *v == self.view)
+            .unwrap_or(0) as isize;
+        let next = (current + delta).rem_euclid(count) as usize;
+        self.switch_view(View::ALL[next]);
+    }
+
+    #[allow(dead_code)]
     fn toggle_focus(&mut self) {
         self.focus = match self.focus {
             Focus::List => {

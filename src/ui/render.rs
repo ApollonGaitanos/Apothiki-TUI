@@ -541,7 +541,15 @@ fn draw_list(f: &mut Frame, area: Rect, ui: &mut Ui) {
             crate::data::aur::AurState::Failed => "  (AUR unavailable)",
             _ => "",
         };
-        format!(" search: {}▏ ({} results){state} ", ui.query, ui.results.len())
+        // The cursor only appears when the field actually has focus, so that
+        // "Escape released it" is visible rather than something to remember.
+        let cursor = if ui.searching { "▏" } else { "" };
+        let hint = if ui.searching { "" } else { "  Ctrl+F to type" };
+        format!(
+            " search: {}{cursor} ({} results){state}{hint} ",
+            ui.query,
+            ui.results.len()
+        )
     } else if ui.searching || !ui.query.is_empty() {
         format!(" filter: {}▏ ({} matches) ", ui.query, ui.rows().len())
     } else {
@@ -1042,13 +1050,20 @@ fn impact_lines(ui: &mut Ui) -> Vec<Line<'static>> {
 fn draw_keybar(f: &mut Frame, area: Rect, ui: &Ui) {
     let hints: Vec<(&str, &str)> = if ui.dialog.is_some() {
         vec![("↑↓", "mode"), ("Enter", "confirm"), ("Ctrl+S", "snapshot"), ("Esc", "cancel")]
+    } else if ui.searching && ui.view == View::Search {
+        vec![
+            ("Esc", "stop typing"),
+            ("Enter", "install"),
+            ("↑↓", "move"),
+            ("Tab", "next view"),
+        ]
     } else if ui.searching {
-        vec![("Esc", "cancel"), ("Enter", "keep"), ("↑↓", "move")]
+        vec![("Esc", "cancel"), ("Enter", "keep"), ("↑↓", "move"), ("Tab", "next view")]
     } else {
         let mut h = vec![
             ("F1", "help"),
-            ("1-4", "views"),
-            ("Ctrl+F", "search"),
+            ("1-5/Tab", "views"),
+            ("Ctrl+F", "filter"),
             ("→", "open"),
             ("←", "back"),
             ("Del", "remove"),
@@ -1057,8 +1072,8 @@ fn draw_keybar(f: &mut Frame, area: Rect, ui: &Ui) {
         if ui.view == View::Search {
             h = vec![
                 ("F1", "help"),
-                ("1-5", "views"),
-                ("type", "search"),
+                ("1-5/Tab", "views"),
+                ("Ctrl+F", "type"),
                 ("→/Enter", "install"),
                 ("Ctrl+Q", "quit"),
             ];
@@ -1115,8 +1130,11 @@ fn draw_help(f: &mut Frame, area: Rect, ui: &Ui) {
         Line::styled("apothiki — read-only explorer", Style::default().fg(ACCENT)),
         Line::raw(""),
         Line::raw("1 2 3 4 5      Apps / Tools / Deps / Orphans / Search"),
+        Line::raw("Tab / Shift+Tab  next / previous view"),
         Line::raw("↑ ↓ PgUp PgDn Home End   move"),
-        Line::raw("Ctrl+F         search        F5   refresh"),
+        Line::raw("Ctrl+F         filter, or edit the search query"),
+        Line::raw("Esc            leave the search field, then 1-5 work"),
+        Line::raw("F5             refresh"),
         Line::raw("→ or Enter     open: list → relationships → package"),
         Line::raw("← or Backspace go back"),
         Line::raw("Del            remove the selected package"),
