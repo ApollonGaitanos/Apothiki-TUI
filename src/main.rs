@@ -1,11 +1,16 @@
 //! `apo` — application-centric package explorer for Arch Linux.
 //!
-//! M1 scaffolding: no TUI yet. This entry point exists so the data layer can be
-//! exercised against the real system while it is being built (spec §16: build
-//! `data/` and `apps/` first, do not start with the UI).
+//! M1: read-only explorer. **This build performs no write operations of any
+//! kind** — it never invokes pacman for anything but read-only queries, and it
+//! never writes to the pacman database (spec §12/M1).
+//!
+//! Running with no arguments starts the TUI. The subcommands are development
+//! tools that predate it and remain useful for scripted checks.
 
 mod apps;
 mod data;
+mod state;
+mod ui;
 mod verify;
 
 use data::fileindex::FileIndex;
@@ -15,11 +20,48 @@ use data::sync::SyncDb;
 
 fn main() -> anyhow::Result<()> {
     match std::env::args().nth(1).as_deref() {
-        Some("verify") => return run_verify(),
-        Some("apps") => return run_apps(),
-        _ => {}
+        Some("verify") => run_verify(),
+        Some("apps") => run_apps(),
+        Some("stats") => stats(),
+        Some("--help" | "-h") => {
+            println!(
+                "apo — application-centric package explorer\n\n\
+                 apo              start the explorer\n\
+                 apo stats        parse statistics\n\
+                 apo apps         application catalog\n\
+                 apo apps tools   tools list\n\
+                 apo verify [n|names…]   check the model against pacman\n\n\
+                 This build is read-only and removes nothing."
+            );
+            Ok(())
+        }
+        _ => run_tui(),
     }
-    stats()
+}
+
+/// Refuses to start as root.
+///
+/// Read-only inspection needs no privileges whatsoever, and a root TUI is one
+/// stray keystroke away from being the most dangerous program on the system
+/// (spec §7.4, §16).
+fn run_tui() -> anyhow::Result<()> {
+    // SAFETY: getuid is always safe; it reads a process attribute.
+    if unsafe { libc_getuid() } == 0 {
+        anyhow::bail!(
+            "refusing to run as root — this tool only reads, and needs no privileges"
+        );
+    }
+
+    let state = state::SystemState::load()?;
+    ui::run(state)
+}
+
+/// `getuid(2)` without pulling in the `libc` crate for one call.
+unsafe fn libc_getuid() -> u32 {
+    unsafe extern "C" {
+        fn getuid() -> u32;
+    }
+    unsafe { getuid() }
 }
 
 /// Lists the synthesised application catalog. Compare this against the desktop
@@ -109,7 +151,7 @@ fn truncate(s: &str, max: usize) -> String {
 /// Checks the dependency model against pacman itself. See `verify`.
 fn run_verify() -> anyhow::Result<()> {
     let db = LocalDb::load(LocalDb::DEFAULT_ROOT)?;
-    let g = Graph::build(&db);
+    let g = Graph::build(std::sync::Arc::new(db));
 
     // A bare number samples that many packages; explicit names re-check known
     // divergences cheaply. The full sweep spawns one pacman per package and is

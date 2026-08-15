@@ -13,6 +13,7 @@
 //! `pacman -Rs --print` dry-run first (§5.2, §12/M2).
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 
 use crate::data::dep::Dep;
 use crate::data::local::{LocalDb, Reason};
@@ -20,10 +21,14 @@ use crate::data::local::{LocalDb, Reason};
 /// Index into `LocalDb::packages`.
 pub type PkgIdx = u32;
 
-pub struct Graph<'a> {
-    pub db: &'a LocalDb,
+pub struct Graph {
+    pub db: Arc<LocalDb>,
     /// Dependency name (real or virtual) → every installed package providing it.
-    providers: HashMap<&'a str, Vec<PkgIdx>>,
+    ///
+    /// Owned keys rather than borrows from `db`: the graph has to live inside an
+    /// owned snapshot that a background thread builds and hands to the UI, and a
+    /// lifetime parameter would make that impossible.
+    providers: HashMap<String, Vec<PkgIdx>>,
     /// Resolved forward edges, deduplicated.
     depends_on: Vec<Vec<PkgIdx>>,
     /// Resolved reverse edges.
@@ -158,7 +163,7 @@ fn provide_satisfies(dep_constraint: Option<&str>, provide_constraint: Option<&s
 /// name also exists; treating the real package as the sole satisfier drops the
 /// reverse edges from everything that depends on it, and it then looks
 /// removable when it is not.
-fn resolve(db: &LocalDb, providers: &HashMap<&str, Vec<PkgIdx>>, dep: &Dep) -> Vec<PkgIdx> {
+fn resolve(db: &LocalDb, providers: &HashMap<String, Vec<PkgIdx>>, dep: &Dep) -> Vec<PkgIdx> {
     let mut out = Vec::new();
 
     // A dependency on an installed package name is satisfied by definition:
@@ -184,27 +189,24 @@ fn resolve(db: &LocalDb, providers: &HashMap<&str, Vec<PkgIdx>>, dep: &Dep) -> V
     out
 }
 
-impl<'a> Graph<'a> {
-    pub fn build(db: &'a LocalDb) -> Self {
+impl Graph {
+    pub fn build(db: Arc<LocalDb>) -> Self {
         let n = db.packages.len();
 
         // A package provides its own name, plus everything in %PROVIDES%.
         // Without the provides map, dependencies like `sh`, `java-runtime` or
         // `libGL.so=1-64` resolve to nothing and the graph quietly develops
         // holes that corrupt orphan detection (spec §13.1).
-        let mut providers: HashMap<&str, Vec<PkgIdx>> = HashMap::with_capacity(n * 2);
+        let mut providers: HashMap<String, Vec<PkgIdx>> = HashMap::with_capacity(n * 2);
         for (i, p) in db.packages.iter().enumerate() {
-            providers.entry(p.name.as_str()).or_default().push(i as u32);
+            providers.entry(p.name.clone()).or_default().push(i as u32);
             for prov in &p.provides {
-                providers
-                    .entry(prov.name.as_str())
-                    .or_default()
-                    .push(i as u32);
+                providers.entry(prov.name.clone()).or_default().push(i as u32);
             }
         }
 
         let mut g = Graph {
-            db,
+            db: Arc::clone(&db),
             providers,
             depends_on: vec![Vec::new(); n],
             required_by: vec![Vec::new(); n],
@@ -217,7 +219,7 @@ impl<'a> Graph<'a> {
         for (i, p) in db.packages.iter().enumerate() {
             let i = i as u32;
             for d in &p.depends {
-                let hits = resolve(db, &g.providers, d);
+                let hits = resolve(&db, &g.providers, d);
                 if hits.is_empty() {
                     g.unresolved.push((i, d.to_string()));
                 }
@@ -230,7 +232,7 @@ impl<'a> Graph<'a> {
             }
 
             for od in &p.optdepends {
-                for h in resolve(db, &g.providers, &od.dep) {
+                for h in resolve(&db, &g.providers, &od.dep) {
                     if h != i && !g.optional_for[h as usize].contains(&i) {
                         g.optional_for[h as usize].push(i);
                     }
@@ -601,7 +603,7 @@ mod tests {
             ("bash", Reason::Dependency, &[], &["sh"], &[]),
             ("mesa", Reason::Dependency, &[], &["libGL.so=1-64"], &[]),
         ]);
-        let g = Graph::build(&db);
+        let g = Graph::build(std::sync::Arc::new(db));
         let app = g.index_of("app").unwrap();
 
         assert_eq!(names(&g, g.depends_on(app)), ["bash", "mesa"]);
@@ -616,7 +618,7 @@ mod tests {
             ("app", Reason::Explicit, &["curl>=7.20.0"], &[], &[]),
             ("curl", Reason::Dependency, &[], &[], &[]),
         ]);
-        let g = Graph::build(&db);
+        let g = Graph::build(std::sync::Arc::new(db));
         assert_eq!(names(&g, g.depends_on(g.index_of("app").unwrap())), ["curl"]);
     }
 
@@ -626,7 +628,7 @@ mod tests {
             ("app", Reason::Explicit, &[], &[], &[]),
             ("leftover", Reason::Dependency, &[], &[], &[]),
         ]);
-        let g = Graph::build(&db);
+        let g = Graph::build(std::sync::Arc::new(db));
         assert_eq!(
             names(&g, &g.orphans(OrphanMode::Conservative)),
             ["leftover"]
@@ -642,7 +644,7 @@ mod tests {
             ("a", Reason::Dependency, &["b"], &[], &[]),
             ("b", Reason::Dependency, &["a"], &[], &[]),
         ]);
-        let g = Graph::build(&db);
+        let g = Graph::build(std::sync::Arc::new(db));
         assert_eq!(names(&g, &g.orphans(OrphanMode::Aggressive)), ["a", "b"]);
         assert_eq!(names(&g, &g.cycle_trapped_orphans()), ["a", "b"]);
     }
@@ -653,7 +655,7 @@ mod tests {
             ("app", Reason::Explicit, &[], &[], &["extra: nice to have"]),
             ("extra", Reason::Dependency, &[], &[], &[]),
         ]);
-        let g = Graph::build(&db);
+        let g = Graph::build(std::sync::Arc::new(db));
         // -Qdt style: not reported, something optionally wants it.
         assert!(g.orphans(OrphanMode::Conservative).is_empty());
         // -Qdtt style: reported.
@@ -668,7 +670,7 @@ mod tests {
             ("gegl", Reason::Dependency, &[], &[], &[]),
             ("glib", Reason::Dependency, &[], &[], &[]),
         ]);
-        let g = Graph::build(&db);
+        let g = Graph::build(std::sync::Arc::new(db));
         let plan = g.plan_removal(&[g.index_of("gimp").unwrap()]);
 
         // gegl goes with it; glib stays because firefox still needs it.
@@ -686,7 +688,7 @@ mod tests {
             ("tool", Reason::Explicit, &[], &[], &[]),
             ("lib", Reason::Dependency, &[], &[], &[]),
         ]);
-        let g = Graph::build(&db);
+        let g = Graph::build(std::sync::Arc::new(db));
         let plan = g.plan_removal(&[g.index_of("app").unwrap()]);
         assert_eq!(names(&g, &plan.cascade), ["lib"]);
         assert!(!plan.all_removed().contains(&g.index_of("tool").unwrap()));
@@ -698,7 +700,7 @@ mod tests {
             ("app", Reason::Explicit, &["lib"], &[], &[]),
             ("lib", Reason::Dependency, &[], &[], &[]),
         ]);
-        let g = Graph::build(&db);
+        let g = Graph::build(std::sync::Arc::new(db));
         let plan = g.plan_removal(&[g.index_of("lib").unwrap()]);
         assert!(plan.is_blocked());
         let (dependent, dep) = plan.blockers[0];
@@ -712,7 +714,7 @@ mod tests {
             ("player", Reason::Explicit, &[], &[], &["codec: MP3 support"]),
             ("codec", Reason::Explicit, &[], &[], &[]),
         ]);
-        let g = Graph::build(&db);
+        let g = Graph::build(std::sync::Arc::new(db));
         let plan = g.plan_removal(&[g.index_of("codec").unwrap()]);
 
         assert!(!plan.is_blocked(), "optdeps must never block a removal");
@@ -731,7 +733,7 @@ mod tests {
             ("lib", Reason::Dependency, &[], &[], &[]),
             ("junk", Reason::Dependency, &[], &[], &[]),
         ]);
-        let g = Graph::build(&db);
+        let g = Graph::build(std::sync::Arc::new(db));
         let plan = g.plan_removal(&[g.index_of("app").unwrap()]);
 
         assert_eq!(names(&g, &plan.all_removed()), ["app", "lib"]);
@@ -754,7 +756,7 @@ mod tests {
             ("libxml2", Reason::Dependency, &[], &["libxml2.so=16-64"], &[]),
             ("libxml2-legacy", Reason::Dependency, &[], &["libxml2.so=2-64"], &[]),
         ]);
-        let g = Graph::build(&db);
+        let g = Graph::build(std::sync::Arc::new(db));
 
         assert_eq!(names(&g, g.depends_on(g.index_of("app").unwrap())), ["libxml2"]);
         assert_eq!(
@@ -772,7 +774,7 @@ mod tests {
             ("glew", Reason::Dependency, &[], &["libGLEW.so=2.3-64"], &[]),
             ("lib32-glew", Reason::Dependency, &[], &["libGLEW.so=2.3-32"], &[]),
         ]);
-        let g = Graph::build(&db);
+        let g = Graph::build(std::sync::Arc::new(db));
         assert_eq!(
             names(&g, g.depends_on(g.index_of("game").unwrap())),
             ["lib32-glew"]
@@ -795,7 +797,7 @@ mod tests {
                 &[],
             ),
         ]);
-        let g = Graph::build(&db);
+        let g = Graph::build(std::sync::Arc::new(db));
         assert_eq!(
             names(&g, g.depends_on(g.index_of("curl").unwrap())),
             ["ca-certificates", "ca-certificates-utils"]
@@ -826,7 +828,7 @@ mod tests {
             ),
             ("leptonica", Reason::Dependency, &[], &[], &[]),
         ]);
-        let g = Graph::build(&db);
+        let g = Graph::build(std::sync::Arc::new(db));
 
         let cycle = names(&g, g.cycle_group(g.index_of("tesseract").unwrap()));
         assert_eq!(cycle, ["tesseract", "tesseract-data-eng"]);
@@ -853,7 +855,7 @@ mod tests {
                 &[],
             ),
         ]);
-        let g = Graph::build(&db);
+        let g = Graph::build(std::sync::Arc::new(db));
         let plan = g.plan_removal(&[g.index_of("spectacle").unwrap()]);
         assert_eq!(names(&g, &plan.all_removed()), ["spectacle"]);
     }
@@ -865,7 +867,7 @@ mod tests {
             ("a", Reason::Dependency, &["b"], &[], &[]),
             ("b", Reason::Explicit, &["a"], &[], &[]),
         ]);
-        let g = Graph::build(&db);
+        let g = Graph::build(std::sync::Arc::new(db));
         let plan = g.plan_removal(&[g.index_of("app").unwrap()]);
         assert_eq!(names(&g, &plan.all_removed()), ["app"]);
     }
@@ -878,7 +880,7 @@ mod tests {
             ("b", Reason::Dependency, &["c"], &[], &[]),
             ("c", Reason::Dependency, &[], &[], &[]),
         ]);
-        let g = Graph::build(&db);
+        let g = Graph::build(std::sync::Arc::new(db));
         let plan = g.plan_removal(&[g.index_of("a").unwrap()]);
         assert_eq!(names(&g, &plan.all_removed()), ["a", "b", "c"]);
     }
