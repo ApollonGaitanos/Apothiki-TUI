@@ -37,11 +37,6 @@ fn run_apps() -> anyhow::Result<()> {
     let catalog = apps::resolve(&db, &index, &suffixes, &noise);
     let elapsed = started.elapsed();
 
-    let unowned = catalog
-        .apps
-        .iter()
-        .filter(|a| a.source == apps::Source::Unowned)
-        .count();
     println!(
         "{} apps, {} tools, {} desktop entries filtered out, in {:.1?}",
         catalog.apps.len(),
@@ -49,7 +44,13 @@ fn run_apps() -> anyhow::Result<()> {
         catalog.filtered.len(),
         elapsed
     );
-    println!("{unowned} apps own no pacman package (Flatpak/AppImage candidates)\n");
+
+    let mut by_source: std::collections::BTreeMap<String, usize> = Default::default();
+    for a in &catalog.apps {
+        *by_source.entry(format!("{:?}", a.source)).or_default() += 1;
+    }
+    let sources: Vec<String> = by_source.iter().map(|(s, n)| format!("{n} {s}")).collect();
+    println!("by source: {}\n", sources.join(", "));
 
     if std::env::args().nth(2).as_deref() == Some("tools") {
         for tool in &catalog.tools {
@@ -68,12 +69,19 @@ fn run_apps() -> anyhow::Result<()> {
         } else {
             app.packages.join("+")
         };
-        let stream = if app.appstream_id.is_some() { "M" } else { " " };
+        let tag = match app.source {
+            apps::Source::Pacman => "pkg",
+            apps::Source::Flatpak => "flat",
+            apps::Source::AppImage => "img",
+            apps::Source::Steam => "steam",
+            apps::Source::Unowned => "?",
+        };
         println!(
-            "{stream} {:<34} {:<34} {}",
-            truncate(&app.name, 33),
-            truncate(&pkgs, 33),
-            truncate(app.summary.as_deref().unwrap_or(""), 60)
+            "{:<6} {:<32} {:<28} {}",
+            tag,
+            truncate(&app.name, 31),
+            truncate(&pkgs, 27),
+            truncate(app.summary.as_deref().unwrap_or(""), 56)
         );
     }
 

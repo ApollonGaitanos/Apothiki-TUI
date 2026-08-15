@@ -18,7 +18,9 @@
 //! marked as dependencies, and most applications arrive through metapackages, so
 //! explicit-only would hide half the user's programs (spec §4.3).
 
+pub mod appimage;
 pub mod desktop;
+pub mod flatpak;
 pub mod metainfo;
 
 use std::collections::{BTreeMap, HashMap};
@@ -26,15 +28,32 @@ use std::collections::{BTreeMap, HashMap};
 use crate::data::fileindex::FileIndex;
 use crate::data::local::LocalDb;
 
-/// Where an application came from.
+/// Where an application came from. Each has its own removal path, so the
+/// distinction is not cosmetic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
     /// Backed by one or more pacman packages.
     Pacman,
-    /// A launchable with no owning package — Flatpak, AppImage, or something
-    /// hand-installed. Layer 4 refines these; until then the distinction that
-    /// matters is simply "pacman does not own this".
+    /// Installed via Flatpak. Removed with `flatpak uninstall`, never pacman.
+    Flatpak,
+    /// A self-contained bundle on disk. **Has no dependency graph** — the UI
+    /// must say "self-contained bundle" rather than render an empty dependency
+    /// list, which reads as a bug (spec §13.13). Removal is deleting files.
+    AppImage,
+    /// A Steam library entry. Not installed software in any package sense, and
+    /// not ours to remove — Steam owns it. Marked so it can be grouped or
+    /// hidden rather than sitting next to Firefox looking like a bug.
+    Steam,
+    /// A launchable no other layer explains: hand-extracted tarballs, scripts,
+    /// anything dropped in by hand. Honest about not knowing.
     Unowned,
+}
+
+impl Source {
+    /// Whether this tool can remove it at all.
+    pub fn is_removable_by_us(&self) -> bool {
+        matches!(self, Source::Pacman | Source::Flatpak | Source::AppImage)
+    }
 }
 
 /// Why we believe this is an application. Every classification must be
@@ -52,6 +71,12 @@ pub enum Evidence {
     ExplicitWithBinary(String),
     /// Explicitly installed with no launchable and no binary of its own.
     ExplicitNoLaunchable,
+    /// Matched an installed Flatpak by exported desktop id.
+    Flatpak { id: String, origin: String },
+    /// `Exec=` resolves to an executable `.AppImage` on disk.
+    AppImageFile(String),
+    /// `Exec=` launches through Steam.
+    SteamShortcut,
 }
 
 /// Groups whose members are system scaffolding rather than user choices, and so
@@ -187,12 +212,103 @@ pub fn resolve(
             .push((entry.id.clone(), format!("{why:?}")));
     }
 
+    attribute_unowned(&mut catalog);
     merge_auxiliary_packages(&mut catalog.apps, db, merge_suffixes);
     add_explicit_tools(&mut catalog, db, index);
 
     catalog.apps.sort_by(|a, b| a.name.cmp(&b.name));
     catalog.tools.sort_by(|a, b| a.name.cmp(&b.name));
     catalog
+}
+
+/// Layer 4: explains the launchables pacman does not own.
+///
+/// Runs only over apps already marked `Unowned`, so a package-backed app can
+/// never be reclassified by a heuristic. Each source has a different removal
+/// path, which is why "we don't know" is a distinct outcome rather than a
+/// default that quietly absorbs everything.
+fn attribute_unowned(catalog: &mut Catalog) {
+    let flatpaks = flatpak::list();
+    let by_id = flatpak::by_desktop_id(&flatpaks);
+
+    // Only unowned entries are candidates for AppImage discovery.
+    let candidates: Vec<(String, String)> = catalog
+        .apps
+        .iter()
+        .filter(|a| a.source == Source::Unowned)
+        .filter_map(|a| {
+            Some((a.desktop_id.clone()?, a.exec.clone()?))
+        })
+        .collect();
+
+    let images = appimage::discover(
+        candidates.iter().map(|(d, e)| (d.as_str(), e.as_str())),
+        &appimage::default_dirs(),
+    );
+    let image_by_desktop: HashMap<&str, &appimage::AppImage> = images
+        .iter()
+        .filter_map(|i| Some((i.desktop_id.as_deref()?, i)))
+        .collect();
+
+    for app in catalog.apps.iter_mut() {
+        if app.source != Source::Unowned {
+            continue;
+        }
+        let Some(did) = app.desktop_id.clone() else {
+            continue;
+        };
+
+        if let Some(fp) = by_id.get(&did) {
+            app.source = Source::Flatpak;
+            app.evidence.push(Evidence::Flatpak {
+                id: fp.id.clone(),
+                origin: fp.origin.clone(),
+            });
+            if app.summary.is_none() && !fp.size.is_empty() {
+                app.summary = Some(format!("Flatpak from {} ({})", fp.origin, fp.size));
+            }
+            continue;
+        }
+
+        if let Some(img) = image_by_desktop.get(did.as_str()) {
+            app.source = Source::AppImage;
+            app.evidence
+                .push(Evidence::AppImageFile(img.path.display().to_string()));
+            continue;
+        }
+
+        // Steam shortcuts launch through the Steam client, which owns the
+        // install. We can neither size nor remove them.
+        if app
+            .exec
+            .as_deref()
+            .and_then(appimage::exec_target)
+            .is_some_and(|t| {
+                let s = t.to_string_lossy();
+                s == "steam" || s.ends_with("/steam") || s.starts_with("steam://")
+            })
+        {
+            app.source = Source::Steam;
+            app.evidence.push(Evidence::SteamShortcut);
+        }
+    }
+
+    // AppImages sitting on disk that were never integrated into a launcher have
+    // no desktop entry to attach to, so they become apps in their own right.
+    for img in images.iter().filter(|i| i.desktop_id.is_none()) {
+        catalog.apps.push(App {
+            name: img.file_stem.clone(),
+            summary: Some("AppImage (not integrated into the launcher)".into()),
+            icon: None,
+            categories: Vec::new(),
+            exec: Some(img.path.display().to_string()),
+            desktop_id: None,
+            appstream_id: None,
+            packages: Vec::new(),
+            source: Source::AppImage,
+            evidence: vec![Evidence::AppImageFile(img.path.display().to_string())],
+        });
+    }
 }
 
 /// Layer 4: explicitly-installed packages with no launchable evidence.

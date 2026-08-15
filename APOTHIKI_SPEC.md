@@ -282,11 +282,22 @@ If `archlinux-appstream-data` is absent, everything must still work. Degrade to 
 **Tools:** packages that are `explicit`, have no launchable evidence, and are not in the
 `base`/`base-devel` groups. Rank by whether they own something in `/usr/bin`.
 
-**AppImages:** no registry exists anywhere. Purely filesystem discovery:
-- Scan `~/Applications`, `~/.local/bin`, `~/Downloads`, `~/bin`, `/opt` for `*.AppImage`
-  (case-insensitive, and check the executable bit).
-- Cross-reference `~/.local/share/applications/*.desktop` entries whose `Exec` points
-  outside pacman-owned paths — these are entries created by AppImageLauncher or `appimaged`.
+**AppImages:** no registry exists anywhere. Purely filesystem discovery.
+
+**Follow `Exec=` first; treat directory scanning as the fallback.** Measured: the directory
+list below finds **zero** of the four AppImages on the dev machine, which keeps them in
+`~/AppImages` — a directory this spec originally omitted. Any "usual directories" list is a
+guess about a user's filing habits, whereas an integrated `.desktop` entry points at the
+file wherever it actually is.
+
+- **Primary:** for each launchable that no package owns, resolve the `Exec=` target and test
+  it for a `.AppImage` extension (case-insensitive) plus the executable bit. Must see
+  through `env VAR=x /path/to/app` wrappers — nine user entries on this machine launch that
+  way — and through quoted paths.
+- **Secondary:** scan `~/AppImages`, `~/Applications`, `~/.local/bin`, `~/Downloads`,
+  `~/bin`, `/opt` to catch AppImages never integrated into a launcher. Keep the list in
+  config. Check the executable bit: a non-executable `.AppImage` is a download that was
+  never run, not an installed application.
 - Optionally read the embedded `.desktop` from the AppImage's squashfs for a proper name.
   This requires either `--appimage-extract` (slow, writes to disk) or parsing the ELF +
   squashfs offset directly. **v1: skip extraction, use filename + any integrated desktop
@@ -299,6 +310,22 @@ If `archlinux-appstream-data` is absent, everything must still work. Degrade to 
 **Flatpak:** proper CLI exists. `flatpak list --app --columns=application,name,size,origin`.
 Uninstall via `flatpak uninstall`. Cleanup via `flatpak uninstall --unused`.
 Treat as a parallel source with its own removal path. Low risk, high value, cheap.
+
+Flatpak apps already appear in the Layer 2 scan, since their exports sit in
+`XDG_DATA_DIRS`. So this is not a discovery problem but an **attribution** one: match the
+exported `<app-id>.desktop` to mark the entry Flatpak-owned instead of "no package owns
+this". Keep the reported size as text — the CLI localises the decimal separator (`395,7 MB`
+here), so parsing it into bytes is wrong in exactly the locales where it looks parseable.
+
+**Steam shortcuts.** Not in the original spec, and unavoidable: 13 of the launchables here
+are Steam library entries whose `Exec` is `steam steam://rungameid/…`. They are not
+installed software in any package sense and Steam owns their lifecycle. Give them their own
+source so they can be grouped or hidden, and never offer removal. Without this they sit next
+to Firefox with no owning package, which reads as a bug in our attribution.
+
+**Leave a genuine "unknown" bucket.** Hand-extracted tarballs exist (one here: Telegram in
+`~/Documents/Apps`). A source of last resort that admits we don't know beats a heuristic
+that quietly mislabels it.
 
 ### 4.3 Rejected alternatives (do not revisit)
 
