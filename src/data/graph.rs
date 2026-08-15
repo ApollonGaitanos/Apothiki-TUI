@@ -64,7 +64,7 @@ fn compute_sccs(n: usize, adj: &[Vec<PkgIdx>]) -> Vec<u32> {
     let mut comp = vec![UNVISITED; n];
     let (mut next_index, mut next_comp) = (0u32, 0u32);
 
-    for start in 0..n {
+    for (start, _) in adj.iter().enumerate() {
         if index[start] != UNVISITED {
             continue;
         }
@@ -82,6 +82,9 @@ fn compute_sccs(n: usize, adj: &[Vec<PkgIdx>]) -> Vec<u32> {
             }
 
             let mut descended = false;
+            // Indexed rather than iterated because the position is saved and
+            // resumed: descending into a child suspends this frame mid-scan.
+            #[allow(clippy::needless_range_loop)]
             for i in child..adj[vi].len() {
                 let w = adj[vi][i] as usize;
                 if index[w] == UNVISITED {

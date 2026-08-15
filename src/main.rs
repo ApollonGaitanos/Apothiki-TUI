@@ -4,20 +4,98 @@
 //! exercised against the real system while it is being built (spec §16: build
 //! `data/` and `apps/` first, do not start with the UI).
 
+mod apps;
 mod data;
 mod verify;
 
 use data::fileindex::FileIndex;
-use data::graph::{Graph, OrphanMode};
+use data::graph::Graph;
 use data::local::{LocalDb, Reason};
 use data::sync::SyncDb;
 
 fn main() -> anyhow::Result<()> {
     match std::env::args().nth(1).as_deref() {
         Some("verify") => return run_verify(),
+        Some("apps") => return run_apps(),
         _ => {}
     }
     stats()
+}
+
+/// Lists the synthesised application catalog. Compare this against the desktop
+/// launcher: anything the launcher shows that is missing here is a filter bug.
+fn run_apps() -> anyhow::Result<()> {
+    let started = std::time::Instant::now();
+    let db = LocalDb::load(LocalDb::DEFAULT_ROOT)?;
+    let (index, _) = FileIndex::load_or_build(&db);
+
+    let suffixes: Vec<String> = apps::DEFAULT_MERGE_SUFFIXES
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let noise: Vec<String> = apps::DEFAULT_NOISE.iter().map(|s| s.to_string()).collect();
+    let catalog = apps::resolve(&db, &index, &suffixes, &noise);
+    let elapsed = started.elapsed();
+
+    let unowned = catalog
+        .apps
+        .iter()
+        .filter(|a| a.source == apps::Source::Unowned)
+        .count();
+    println!(
+        "{} apps, {} tools, {} desktop entries filtered out, in {:.1?}",
+        catalog.apps.len(),
+        catalog.tools.len(),
+        catalog.filtered.len(),
+        elapsed
+    );
+    println!("{unowned} apps own no pacman package (Flatpak/AppImage candidates)\n");
+
+    if std::env::args().nth(2).as_deref() == Some("tools") {
+        for tool in &catalog.tools {
+            println!(
+                "  {:<30} {}",
+                truncate(&tool.name, 29),
+                truncate(tool.summary.as_deref().unwrap_or(""), 70)
+            );
+        }
+        return Ok(());
+    }
+
+    for app in &catalog.apps {
+        let pkgs = if app.packages.is_empty() {
+            "-".to_string()
+        } else {
+            app.packages.join("+")
+        };
+        let stream = if app.appstream_id.is_some() { "M" } else { " " };
+        println!(
+            "{stream} {:<34} {:<34} {}",
+            truncate(&app.name, 33),
+            truncate(&pkgs, 33),
+            truncate(app.summary.as_deref().unwrap_or(""), 60)
+        );
+    }
+
+    // Why entries were dropped, so filters can be sanity-checked in bulk.
+    let mut reasons: std::collections::BTreeMap<String, usize> = Default::default();
+    for (_, why) in &catalog.filtered {
+        let key = why.split('(').next().unwrap_or(why).to_string();
+        *reasons.entry(key).or_default() += 1;
+    }
+    println!("\nfiltered by reason:");
+    for (why, n) in &reasons {
+        println!("  {why:<28} {n}");
+    }
+
+    Ok(())
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    s.chars().take(max.saturating_sub(1)).collect::<String>() + "…"
 }
 
 /// Checks the dependency model against pacman itself. See `verify`.

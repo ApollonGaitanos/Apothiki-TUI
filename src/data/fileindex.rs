@@ -155,6 +155,33 @@ impl FileIndex {
             .map(|s| s.as_str())
     }
 
+    /// Maps each package to one binary it installs under `/usr/bin`.
+    ///
+    /// Built in a single pass over the whole table and returned as a map,
+    /// because the caller needs it for hundreds of packages: querying per
+    /// package would rescan 450k entries each time. The index is sorted by
+    /// path, not by package, so there is no cheaper ordering to exploit.
+    pub fn binaries_by_package(&self) -> HashMap<&str, &str> {
+        const BIN: &str = "usr/bin/";
+        let mut out: HashMap<&str, &str> = HashMap::new();
+
+        for e in &self.entries {
+            let path = slice(&self.arena, e);
+            let Some(name) = path.strip_prefix(BIN) else {
+                continue;
+            };
+            if name.is_empty() || name.contains('/') {
+                continue;
+            }
+            let Some(pkg) = self.packages.get(e.pkg as usize) else {
+                continue;
+            };
+            out.entry(pkg.as_str()).or_insert(name);
+        }
+
+        out
+    }
+
     pub fn backups_of(&self, package: &str) -> &[String] {
         self.packages
             .iter()
