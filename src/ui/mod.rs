@@ -106,6 +106,15 @@ impl RelationKind {
     }
 }
 
+/// Indexes computed from a `SystemState`, grouped so a reload can replace them
+/// all at once and none can be forgotten.
+struct Derived {
+    apps_by_package: HashMap<String, Vec<usize>>,
+    denylist: Denylist,
+    app_package_names: std::collections::HashSet<String>,
+    apps_named_by_package: HashMap<String, Vec<String>>,
+}
+
 pub struct Ui {
     pub state: SystemState,
     pub view: View,
@@ -159,14 +168,7 @@ pub struct Ui {
 
 impl Ui {
     /// Everything derived from a `SystemState`, rebuilt whenever it is replaced.
-    fn derive(
-        state: &SystemState,
-    ) -> (
-        HashMap<String, Vec<usize>>,
-        Denylist,
-        std::collections::HashSet<String>,
-        HashMap<String, Vec<String>>,
-    ) {
+    fn derive(state: &SystemState) -> Derived {
         let mut apps_by_package: HashMap<String, Vec<usize>> = HashMap::new();
         let mut apps_named_by_package: HashMap<String, Vec<String>> = HashMap::new();
         for (i, app) in state.catalog.apps.iter().enumerate() {
@@ -185,12 +187,12 @@ impl Ui {
             .iter()
             .flat_map(|a| a.packages.iter().cloned())
             .collect();
-        (
+        Derived {
             apps_by_package,
             denylist,
             app_package_names,
             apps_named_by_package,
-        )
+        }
     }
 
     pub fn new(
@@ -198,8 +200,13 @@ impl Ui {
         enhanced_keys: bool,
         picker: Option<ratatui_image::picker::Picker>,
     ) -> Self {
-        let (apps_by_package, denylist, app_package_names, apps_named_by_package) =
-            Self::derive(&state);
+        let d = Self::derive(&state);
+        let (apps_by_package, denylist, app_package_names, apps_named_by_package) = (
+            d.apps_by_package,
+            d.denylist,
+            d.app_package_names,
+            d.apps_named_by_package,
+        );
 
         let mut ui = Ui {
             state,
@@ -726,19 +733,18 @@ impl Ui {
     fn finish_reload(&mut self, state: SystemState) {
         // Remember what was selected so the cursor does not jump to the top of
         // the list every refresh.
-        let previous = self.current().and_then(|item| match item {
-            Item::App(i) => Some(self.state.catalog.apps[i].name.clone()),
-            Item::Tool(i) => Some(self.state.catalog.tools[i].name.clone()),
-            Item::Package(p) => Some(self.state.graph.name(p).to_string()),
+        let previous = self.current().map(|item| match item {
+            Item::App(i) => self.state.catalog.apps[i].name.clone(),
+            Item::Tool(i) => self.state.catalog.tools[i].name.clone(),
+            Item::Package(p) => self.state.graph.name(p).to_string(),
         });
 
-        let (apps_by_package, denylist, app_package_names, apps_named_by_package) =
-            Self::derive(&state);
+        let d = Self::derive(&state);
         self.state = state;
-        self.apps_by_package = apps_by_package;
-        self.denylist = denylist;
-        self.app_package_names = app_package_names;
-        self.apps_named_by_package = apps_named_by_package;
+        self.apps_by_package = d.apps_by_package;
+        self.denylist = d.denylist;
+        self.app_package_names = d.app_package_names;
+        self.apps_named_by_package = d.apps_named_by_package;
 
         // Anything cached against the old snapshot is now meaningless.
         self.impact = None;
