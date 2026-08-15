@@ -677,7 +677,30 @@ Terminals intercept most CUA chords. This is a real constraint, not a detail:
 - Always restore terminal state on exit, panic, and signal. Install a panic hook that
   leaves raw mode — a TUI that wrecks the terminal on crash is unforgivable.
 
-### 8.2 Proposed bindings
+### 8.2 Bindings (revised after use, 2026-08-15)
+
+The original F-key scheme was tried and revised by the user. Views moved to the
+number row, freeing the F-keys for their conventional meanings, and
+type-to-search was dropped because it conflicts with digits as view keys.
+
+```
+Views           1 Apps / 2 Tools / 3 Dependencies / 4 Orphans  (F2-F6 alias)
+Navigation      Arrows, PgUp/PgDn, Home/End
+Descend         → or Enter   list → relationships → jump to that package
+Ascend          ← or Backspace
+Search          Ctrl+F only — typing does not start a search
+Remove          Del, or the action at the top of the relationships pane
+Orphan cleanup  c  (Orphans view)
+Orphan level    Space toggles -Qdt / -Qdtt
+Help / Refresh  F1 / F5
+Quit            Ctrl+Q
+```
+
+**Right/Enter lands on the first relationship, not the removal action.**
+Descending must never put a destructive option under the cursor; the user
+reaches it deliberately, by pressing Up.
+
+### 8.2a Original proposal (superseded)
 
 ```
 Navigation      Arrows, PgUp/PgDn, Home/End, Tab / Shift+Tab between panes
