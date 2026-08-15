@@ -164,6 +164,33 @@ pub fn spawn(
     tx: Sender<Output>,
 ) {
     std::thread::spawn(move || {
+        // Development escape hatch: exercise the whole pipeline — confirmation,
+        // dry-run, reconcile, streaming, history — without mutating anything.
+        // Exists so the execution path can be tested honestly rather than by
+        // reading it and hoping.
+        if dry_run_mode() {
+            let _ = tx.send(Output::Line("APOTHIKI_DRY_RUN is set — nothing will be removed".into()));
+            if take_snapshot {
+                let _ = tx.send(Output::Line("would take a snapper pre-transaction snapshot".into()));
+            }
+            let _ = tx.send(Output::Line(format!(
+                "would run: sudo pacman {}",
+                mode.args(&packages).join(" ")
+            )));
+            match exec::dry_run(&mode.dry_run_args(&packages)) {
+                Ok(lines) => {
+                    for l in lines {
+                        let _ = tx.send(Output::Line(format!("  would remove {l}")));
+                    }
+                    let _ = tx.send(Output::Finished { success: true, code: Some(0) });
+                }
+                Err(e) => {
+                    let _ = tx.send(Output::Failed(e.to_string()));
+                }
+            }
+            return;
+        }
+
         let mut snapshot_id: Option<String> = None;
 
         if take_snapshot {
@@ -238,8 +265,18 @@ pub fn spawn(
     });
 }
 
+/// Whether the development dry-run mode is active.
+pub fn dry_run_mode() -> bool {
+    std::env::var_os("APOTHIKI_DRY_RUN").is_some()
+}
+
 /// Checks whether authentication is needed before running.
+///
+/// Dry-run needs no privileges, so it never prompts.
 pub fn auth_stage() -> AuthState {
+    if dry_run_mode() {
+        return AuthState::Ready;
+    }
     exec::check_auth()
 }
 

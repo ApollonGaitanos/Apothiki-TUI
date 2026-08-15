@@ -153,7 +153,11 @@ pub struct Ui {
 }
 
 impl Ui {
-    pub fn new(state: SystemState, enhanced_keys: bool) -> Self {
+    pub fn new(
+        state: SystemState,
+        enhanced_keys: bool,
+        picker: Option<ratatui_image::picker::Picker>,
+    ) -> Self {
         let mut apps_by_package: HashMap<String, Vec<usize>> = HashMap::new();
         for (i, app) in state.catalog.apps.iter().enumerate() {
             for p in &app.packages {
@@ -200,10 +204,7 @@ impl Ui {
             app_package_names,
             apps_named_by_package,
             needs_reload: false,
-            // Queries the terminal for its graphics capability. Falls back to
-            // unicode half-blocks when there is none, which is the expected
-            // path in Konsole without sixel enabled.
-            picker: ratatui_image::picker::Picker::from_query_stdio().ok(),
+            picker,
             icon: None,
         };
         ui.rebuild_rows();
@@ -610,6 +611,13 @@ impl Ui {
         d.output.clear();
     }
 
+    /// True while a spawned operation is still producing output.
+    pub fn operation_running(&self) -> bool {
+        self.dialog
+            .as_ref()
+            .is_some_and(|d| matches!(d.stage, Stage::Running))
+    }
+
     /// Drains streamed output. Called once per tick, never during a render.
     pub fn pump_output(&mut self) {
         let Some(d) = &mut self.dialog else { return };
@@ -839,6 +847,47 @@ impl Ui {
     }
 }
 
+/// Determines how to render images, without disturbing terminal input.
+///
+/// **The stdio query is only used on terminals that advertise graphics
+/// support.** It writes an escape sequence and waits for a reply on stdin; a
+/// terminal that never answers — Konsole, and anything under tmux — leaves the
+/// first keystroke of the session swallowed, so the Delete that should open the
+/// removal dialog silently does nothing. That is a far worse failure than
+/// rendering icons as half-blocks, which looks fine and works everywhere.
+fn probe_picker() -> Option<ratatui_image::picker::Picker> {
+    use ratatui_image::picker::Picker;
+
+    if supports_graphics_protocol() {
+        if let Ok(p) = Picker::from_query_stdio() {
+            return Some(p);
+        }
+    }
+    // Half-blocks need only a cell size to scale against.
+    Some(Picker::from_fontsize(ratatui_image::FontSize::new(8, 16)))
+}
+
+/// Whether the terminal is one known to implement kitty/sixel/iTerm graphics.
+///
+/// Deliberately an allowlist. Guessing wrong costs a swallowed keystroke, and
+/// the fallback renderer is perfectly usable.
+fn supports_graphics_protocol() -> bool {
+    // tmux does not forward the query reply, whatever the outer terminal is.
+    if std::env::var_os("TMUX").is_some() {
+        return false;
+    }
+    if std::env::var_os("KITTY_WINDOW_ID").is_some() {
+        return true;
+    }
+    let term = std::env::var("TERM").unwrap_or_default().to_lowercase();
+    let program = std::env::var("TERM_PROGRAM")
+        .unwrap_or_default()
+        .to_lowercase();
+    ["kitty", "ghostty", "foot", "wezterm", "iterm"]
+        .iter()
+        .any(|t| term.contains(t) || program.contains(t))
+}
+
 /// Runs the UI until the user quits.
 pub fn run(state: SystemState) -> anyhow::Result<()> {
     // Warm the icon index off the render loop. It is only needed for entries
@@ -846,15 +895,37 @@ pub fn run(state: SystemState) -> anyhow::Result<()> {
     // that on the first arrow key over a Steam shortcut is a visible stall.
     std::thread::spawn(crate::apps::icon::warm_index);
 
+    // Probe the terminal's graphics support **before** entering raw mode.
+    //
+    // The probe writes an escape sequence and reads the reply straight from
+    // stdin. Doing that once the event loop owns input means the two compete
+    // for the same bytes, and the observed symptom is keystrokes going missing
+    // for the first second or so after startup — including the Delete that is
+    // supposed to open the removal dialog. Falling back to a fixed font size
+    // costs only native graphics protocols; half-blocks still render.
+    let picker = probe_picker();
+
     let (mut terminal, guard) = term::init()?;
-    let mut ui = Ui::new(state, guard.enhanced_keys);
+    let mut ui = Ui::new(state, guard.enhanced_keys, picker);
 
     while !ui.should_quit {
         terminal.draw(|f| render::draw(f, &mut ui))?;
 
-        // A timeout rather than a blocking read, so the lock-file banner can
-        // recover on its own when another pacman finishes.
-        if event::poll(std::time::Duration::from_millis(250))? {
+        // Drain any running operation's output. Must happen every tick: without
+        // it a started removal streams into a channel nobody reads, so the
+        // dialog sits on "removing…" forever and the user cannot tell whether
+        // anything is happening.
+        ui.pump_output();
+
+        // Poll faster while an operation is live so its output appears as it
+        // arrives rather than in quarter-second lumps.
+        let timeout = if ui.operation_running() {
+            std::time::Duration::from_millis(50)
+        } else {
+            std::time::Duration::from_millis(250)
+        };
+
+        if event::poll(timeout)? {
             match event::read()? {
                 Event::Key(key) if key.is_press() => ui.handle_key(key),
                 Event::Resize(_, _) => {}
