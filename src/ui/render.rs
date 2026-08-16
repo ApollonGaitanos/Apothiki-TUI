@@ -69,6 +69,10 @@ fn draw_locations(f: &mut Frame, area: Rect, ui: &Ui) {
     let popup = centred(area, area.width.saturating_sub(8), area.height.saturating_sub(4));
 
     let mut lines: Vec<Line> = Vec::new();
+    // Selectable rows are counted in the same order `location_paths` produces,
+    // so the highlight and the Enter target cannot drift apart.
+    let mut selectable = 0usize;
+
     for group in groups {
         lines.push(Line::styled(
             group.title.to_string(),
@@ -79,9 +83,20 @@ fn draw_locations(f: &mut Frame, area: Rect, ui: &Ui) {
             Style::default().fg(DIM),
         ));
         for entry in &group.paths {
+            let is_selected = entry.exists && selectable == ui.locations_selected;
+            if entry.exists {
+                selectable += 1;
+            }
+            let marker = if is_selected { "▌ " } else { "  " };
             let mut spans = vec![Span::styled(
-                format!("  {}", entry.path),
-                Style::default().fg(if entry.guessed { WARN } else { Color::Reset }),
+                format!("{marker}{}", entry.path),
+                Style::default()
+                    .fg(if entry.guessed { WARN } else { Color::Reset })
+                    .add_modifier(if is_selected {
+                        Modifier::BOLD | Modifier::REVERSED
+                    } else {
+                        Modifier::empty()
+                    }),
             )];
             if let Some(size) = entry.size {
                 spans.push(Span::styled(
@@ -91,6 +106,9 @@ fn draw_locations(f: &mut Frame, area: Rect, ui: &Ui) {
             }
             if entry.guessed {
                 spans.push(Span::styled("  (guess)", Style::default().fg(DIM)));
+            }
+            if !entry.exists {
+                spans.push(Span::styled("  (not present)", Style::default().fg(DIM)));
             }
             lines.push(Line::from(spans));
         }
@@ -112,7 +130,9 @@ fn draw_locations(f: &mut Frame, area: Rect, ui: &Ui) {
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(ACCENT))
-                    .title(format!(" files of {name} — ↑↓ scroll, any key to close ")),
+                    .title(format!(
+                        " files of {name} — ↑↓ select, → open, PgUp/PgDn scroll, Esc close "
+                    )),
             ),
         popup,
     );
@@ -156,6 +176,10 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
             }
             if let Some(plan) = d.job.as_update() {
                 draw_update_confirm(f, popup, plan, d.snapshot);
+                return;
+            }
+            if let Some(u) = d.job.as_single_update() {
+                draw_single_update_confirm(f, popup, u, d.snapshot);
                 return;
             }
             if let Some(request) = d.job.as_install() {
@@ -391,6 +415,89 @@ fn draw_pkgbuild(
         ),
         popup,
     );
+}
+
+/// Upgrading one package.
+///
+/// The risk is stated first and in full, because this is the path where a
+/// reasonable-looking action breaks the system days later, in a way that will
+/// not obviously connect back to this keypress.
+fn draw_single_update_confirm(
+    f: &mut Frame,
+    popup: Rect,
+    u: &crate::ops::update::Update,
+    snapshot: bool,
+) {
+    use crate::ops::update::UpdateSource;
+
+    let mut lines: Vec<Line> = vec![Line::styled(
+        format!("{}  {} → {}", u.name, u.installed, u.available),
+        Style::default().add_modifier(Modifier::BOLD).fg(ACCENT),
+    )];
+    lines.push(Line::raw(""));
+
+    if u.source == UpdateSource::Repo {
+        lines.push(Line::styled(
+            "This is a partial upgrade.",
+            Style::default().fg(DANGER).add_modifier(Modifier::BOLD),
+        ));
+        lines.push(Line::styled(
+            "The new build expects library versions the rest of your system",
+            Style::default().fg(DIM),
+        ));
+        lines.push(Line::styled(
+            "does not have yet. It may work, or it may break this program —",
+            Style::default().fg(DIM),
+        ));
+        lines.push(Line::styled(
+            "or your session — in ways that surface days later.",
+            Style::default().fg(DIM),
+        ));
+        lines.push(Line::raw(""));
+        lines.push(Line::styled(
+            "Esc, then u, upgrades everything together instead.",
+            Style::default().fg(OK),
+        ));
+    } else {
+        lines.push(Line::styled(
+            "Rebuilt from source by the AUR helper.",
+            Style::default().fg(WARN),
+        ));
+        lines.push(Line::styled(
+            "Safer than a partial repository upgrade, but the build can still",
+            Style::default().fg(DIM),
+        ));
+        lines.push(Line::styled(
+            "pull repository packages forward on its own.",
+            Style::default().fg(DIM),
+        ));
+    }
+
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        format!(
+            "[{}] snapper snapshot first  (Ctrl+S)",
+            if snapshot { "x" } else { " " }
+        ),
+        Style::default().fg(if snapshot { OK } else { DIM }),
+    ));
+    lines.push(Line::styled(
+        format!(
+            "$ {} -S {}",
+            match u.source {
+                UpdateSource::Repo => "sudo pacman",
+                UpdateSource::Aur => "paru",
+            },
+            u.name
+        ),
+        Style::default().fg(DIM),
+    ));
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        "Enter upgrade anyway   Esc cancel".to_string(),
+        Style::default().fg(DIM),
+    ));
+    render_popup(f, popup, " upgrade one package ", lines);
 }
 
 /// The update dialog.
@@ -653,6 +760,7 @@ fn draw_tabs(f: &mut Frame, area: Rect, ui: &Ui) {
                     .count(),
                 View::Orphans => ui.state.graph.orphans(ui.orphan_mode).len(),
                 View::Search => ui.results.len(),
+                View::Updates => ui.updates.total(),
             };
             Line::from(format!(" {} ({count}) ", v.title()))
         })
@@ -782,6 +890,35 @@ fn row_line<'a>(ui: &'a Ui, item: Item) -> Line<'a> {
                 ),
             ])
         }
+        Item::Update(i) => {
+            let Some(u) = ui.sorted_updates.get(i) else {
+                return Line::raw("");
+            };
+            let label = u.display_name.clone().unwrap_or_else(|| u.name.clone());
+            Line::from(vec![
+                Span::styled(
+                    format!("{:<8} ", u.kind.label()),
+                    Style::default().fg(match u.kind {
+                        crate::ops::update::Kind::App => ACCENT,
+                        crate::ops::update::Kind::Tool => Color::Reset,
+                        crate::ops::update::Kind::Package => DIM,
+                    }),
+                ),
+                Span::raw(label),
+                Span::styled(
+                    format!("  {} → {}", u.installed, u.available),
+                    Style::default().fg(DIM),
+                ),
+                Span::styled(
+                    if u.source == crate::ops::update::UpdateSource::Aur {
+                        "  aur"
+                    } else {
+                        ""
+                    },
+                    Style::default().fg(WARN),
+                ),
+            ])
+        }
         Item::Result(i) => {
             let Some(hit) = ui.results.get(i) else {
                 return Line::raw("");
@@ -796,11 +933,17 @@ fn row_line<'a>(ui: &'a Ui, item: Item) -> Line<'a> {
             if hit.installed {
                 spans.push(Span::styled("  installed", Style::default().fg(OK)));
             }
+            // Wording matters here: "out of date" reads as "your system needs
+            // an update", which is a different thing entirely and lives in the
+            // Updates view. This flag is about the packaging.
             if hit.out_of_date {
-                spans.push(Span::styled("  out of date", Style::default().fg(DANGER)));
+                spans.push(Span::styled(
+                    "  packaging behind upstream",
+                    Style::default().fg(WARN),
+                ));
             }
             if hit.orphaned {
-                spans.push(Span::styled("  unmaintained", Style::default().fg(WARN)));
+                spans.push(Span::styled("  no maintainer", Style::default().fg(WARN)));
             }
             Line::from(spans)
         }
@@ -982,6 +1125,34 @@ fn detail_header(ui: &Ui, item: Item, lines: &mut Vec<Line>) {
         }
         return;
     }
+    if let Item::Update(i) = item {
+        if let Some(u) = ui.sorted_updates.get(i) {
+            lines.push(Line::styled(
+                u.display_name.clone().unwrap_or_else(|| u.name.clone()),
+                Style::default().add_modifier(Modifier::BOLD).fg(ACCENT),
+            ));
+            lines.push(Line::raw(""));
+            lines.push(field("package", &u.name));
+            lines.push(field("installed", &u.installed));
+            lines.push(field("available", &u.available));
+            lines.push(field(
+                "from",
+                match u.source {
+                    crate::ops::update::UpdateSource::Repo => "repository",
+                    crate::ops::update::UpdateSource::Aur => "AUR (rebuilt from source)",
+                },
+            ));
+            lines.push(Line::raw(""));
+            lines.push(Line::styled(
+                "u  upgrade the whole system  (recommended)",
+                Style::default().fg(OK),
+            ));
+            lines.push(Line::styled(
+                "→  upgrade only this package",
+                Style::default().fg(WARN),
+            ));
+        }
+    }
 
     let app = match item {
         Item::App(i) => Some(&ui.state.catalog.apps[i]),
@@ -1059,15 +1230,37 @@ fn detail_hit(hit: &crate::data::search::Hit, lines: &mut Vec<Line>) {
             Style::default().fg(WARN),
         ));
         if hit.orphaned {
+            lines.push(Line::raw(""));
             lines.push(Line::styled(
-                "Unmaintained — nobody is applying upstream fixes.",
-                Style::default().fg(DANGER),
+                "No maintainer.",
+                Style::default().fg(WARN).add_modifier(Modifier::BOLD),
+            ));
+            lines.push(Line::styled(
+                "Nobody has volunteered to look after this AUR entry. It will",
+                Style::default().fg(DIM),
+            ));
+            lines.push(Line::styled(
+                "not be updated, and may stop building as Arch moves on.",
+                Style::default().fg(DIM),
             ));
         }
         if hit.out_of_date {
+            lines.push(Line::raw(""));
             lines.push(Line::styled(
-                "Flagged out of date.",
-                Style::default().fg(DANGER),
+                "Packaging is behind upstream.",
+                Style::default().fg(WARN).add_modifier(Modifier::BOLD),
+            ));
+            lines.push(Line::styled(
+                "Users flagged this AUR entry as older than the project's own",
+                Style::default().fg(DIM),
+            ));
+            lines.push(Line::styled(
+                "latest release. This is about the recipe, not about your",
+                Style::default().fg(DIM),
+            ));
+            lines.push(Line::styled(
+                "system — installed updates live in the Updates view.",
+                Style::default().fg(DIM),
             ));
         }
     }
@@ -1300,7 +1493,7 @@ fn draw_help(f: &mut Frame, area: Rect, ui: &Ui) {
     let mut lines = vec![
         Line::styled("apothiki — read-only explorer", Style::default().fg(ACCENT)),
         Line::raw(""),
-        Line::raw("1 2 3 4 5      Apps / Tools / Deps / Orphans / Search"),
+        Line::raw("1 2 3 4 5 6    Apps / Tools / Deps / Orphans / Search / Updates"),
         Line::raw("Tab / Shift+Tab  next / previous view"),
         Line::raw("↑ ↓ PgUp PgDn Home End   move"),
         Line::raw("f              filter, or edit the search query"),
@@ -1311,6 +1504,7 @@ fn draw_help(f: &mut Frame, area: Rect, ui: &Ui) {
         Line::raw("Del            remove the selected package"),
         Line::raw("Ctrl+Z         undo the last removal (from package cache)"),
         Line::raw("l              where this package's files live"),
+        Line::raw("   in that pane: ↑↓ select, → opens in $EDITOR"),
         Line::raw("u              upgrade the system, when updates exist"),
         Line::raw("c  (Orphans)   clean up all orphans"),
         Line::raw("Space (Orphans) toggle -Qdt / -Qdtt"),

@@ -68,6 +68,8 @@ pub enum Job {
     Restore(crate::ops::restore::RestorePlan),
     Install(crate::ops::InstallRequest),
     Update(crate::ops::update::UpdatePlan),
+    /// One package only. Flagged as risky wherever it is shown.
+    SingleUpdate(crate::ops::update::Update),
 }
 
 impl Job {
@@ -99,6 +101,13 @@ impl Job {
     pub fn as_update(&self) -> Option<&crate::ops::update::UpdatePlan> {
         match self {
             Job::Update(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    pub fn as_single_update(&self) -> Option<&crate::ops::update::Update> {
+        match self {
+            Job::SingleUpdate(u) => Some(u),
             _ => None,
         }
     }
@@ -187,6 +196,7 @@ impl RemovalDialog {
                 r.source == crate::ops::InstallSource::Aur && r.helper.is_none()
             }
             Job::Update(p) => p.is_empty(),
+            Job::SingleUpdate(_) => false,
         }
     }
 
@@ -205,6 +215,25 @@ impl RemovalDialog {
         RemovalDialog {
             snapshot: crate::ops::snapshot::is_available(),
             job: Job::Update(plan),
+            stage: Stage::Confirm,
+            mode_index: 0,
+            typed: String::new(),
+            password: String::new(),
+            error: None,
+            output: Vec::new(),
+            receiver: None,
+            confirm_word: String::new(),
+            pkgbuild: None,
+            pkgbuild_scroll: 0,
+            pkgbuild_rx: None,
+        }
+    }
+
+    /// Builds a single-package upgrade dialog.
+    pub fn single_update(update: crate::ops::update::Update) -> Self {
+        RemovalDialog {
+            snapshot: crate::ops::snapshot::is_available(),
+            job: Job::SingleUpdate(update),
             stage: Stage::Confirm,
             mode_index: 0,
             typed: String::new(),
@@ -366,6 +395,73 @@ pub fn verify_against_pacman(
         ));
     }
     Ok(theirs)
+}
+
+/// Spawns a single-package upgrade.
+///
+/// Separate from the system upgrade so the risky path cannot be reached by
+/// accident from the safe one.
+pub fn spawn_single_update(
+    update: crate::ops::update::Update,
+    helper: Option<String>,
+    take_snapshot: bool,
+    tx: Sender<Output>,
+) {
+    use crate::ops::update::{UpdatePlan, UpdateSource};
+
+    std::thread::spawn(move || {
+        let args = UpdatePlan::single_args(&update);
+
+        if dry_run_mode() {
+            let _ = tx.send(Output::Line("APOTHIKI_DRY_RUN is set — nothing will change".into()));
+            let _ = tx.send(Output::Line(format!("would run: {args:?}")));
+            let _ = tx.send(Output::Finished { success: true, code: Some(0) });
+            return;
+        }
+
+        if take_snapshot {
+            if let Some(config) = snapshot::config_name() {
+                let sargs = snapshot::pre_snapshot_args(
+                    &config,
+                    &format!("apothiki: upgrade {}", update.name),
+                );
+                let _ = tx.send(Output::Line("taking snapshot…".into()));
+                if !exec::run_privileged("snapper", &sargs, &tx).success {
+                    let _ = tx.send(Output::Failed(
+                        "snapshot failed — upgrade aborted (uncheck the snapshot option to \
+                         proceed without one)"
+                            .into(),
+                    ));
+                    return;
+                }
+            }
+        }
+
+        let result = match update.source {
+            UpdateSource::Repo => exec::run_privileged("pacman", &args, &tx),
+            UpdateSource::Aur => {
+                let h = helper.unwrap_or_else(|| "paru".into());
+                exec::run_unprivileged(&h, &args, &tx)
+            }
+        };
+
+        let _ = tx.send(Output::Finished {
+            success: result.success,
+            code: result.code,
+        });
+
+        let entry = history::Entry {
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0),
+            operation: "-S (single upgrade)".to_string(),
+            packages: vec![(update.name.clone(), update.available.clone())],
+            success: result.success,
+            snapshot: None,
+        };
+        let _ = history::record(&entry);
+    });
 }
 
 /// Spawns a full system upgrade, then AUR upgrades if any.

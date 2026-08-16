@@ -10,8 +10,13 @@
 //! against library versions the rest of the system does not have yet, and the
 //! result ranges from a broken program to a broken login. It is unsupported
 //! upstream and it is the single most common way people destroy a rolling
-//! install. So a single-package upgrade is deliberately not offered — the action
-//! is a full system upgrade, which is the only form that is safe.
+//! install.
+//!
+//! A single-package upgrade is therefore offered but never the default, and is
+//! labelled as risky everywhere it appears. Refusing outright would be the
+//! safer engineering choice; it would also be paternalistic, and the user asked
+//! for it knowing the trade-off. Making the safe path the obvious one and
+//! naming the risk on the other is the honest middle.
 
 use crate::data::aur::AurIndex;
 use crate::data::local::LocalDb;
@@ -23,6 +28,30 @@ pub struct Update {
     pub installed: String,
     pub available: String,
     pub source: UpdateSource,
+    /// How the package presents itself to the user, for grouping.
+    pub kind: Kind,
+    /// The application name, when this package backs one.
+    pub display_name: Option<String>,
+}
+
+/// What the package is, from the user's point of view. Ordered so `derive(Ord)`
+/// sorts applications before tools before plumbing — the order the user asked
+/// for, and the order of decreasing "I know what this is".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Kind {
+    App,
+    Tool,
+    Package,
+}
+
+impl Kind {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Kind::App => "app",
+            Kind::Tool => "tool",
+            Kind::Package => "package",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +67,32 @@ pub struct UpdatePlan {
 }
 
 impl UpdatePlan {
+    /// Every update, applications first, then tools, then plumbing.
+    pub fn sorted(&self) -> Vec<Update> {
+        let mut all: Vec<Update> = self.repo.iter().chain(self.aur.iter()).cloned().collect();
+        all.sort_by(|a, b| {
+            a.kind
+                .cmp(&b.kind)
+                .then_with(|| a.display_name.cmp(&b.display_name))
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        all
+    }
+
+    /// Upgrading a single package.
+    ///
+    /// Offered because the user asked for it, and flagged wherever it appears:
+    /// for a repository package this is a partial upgrade, which is the classic
+    /// way to break a rolling install. An AUR rebuild is safer in itself but can
+    /// still pull repository dependencies forward, so the warning stands.
+    pub fn single_args(update: &Update) -> Vec<String> {
+        vec![
+            "-S".to_string(),
+            "--noconfirm".to_string(),
+            update.name.clone(),
+        ]
+    }
+
     pub fn total(&self) -> usize {
         self.repo.len() + self.aur.len()
     }
@@ -83,6 +138,8 @@ fn parse_qu_line(line: &str) -> Option<Update> {
         installed,
         available,
         source: UpdateSource::Repo,
+        kind: Kind::Package,
+        display_name: None,
     })
 }
 
@@ -107,6 +164,8 @@ pub fn aur_updates(db: &LocalDb, aur: &AurIndex, foreign: &[String]) -> Vec<Upda
                 installed: local.version.clone(),
                 available: remote.version.clone(),
                 source: UpdateSource::Aur,
+                kind: Kind::Package,
+                display_name: None,
             });
         }
     }
@@ -135,6 +194,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn updates_sort_applications_before_plumbing() {
+        let mk = |name: &str, kind: Kind| Update {
+            name: name.into(),
+            installed: "1".into(),
+            available: "2".into(),
+            source: UpdateSource::Repo,
+            kind,
+            display_name: None,
+        };
+        let plan = UpdatePlan {
+            repo: vec![
+                mk("libfoo", Kind::Package),
+                mk("ripgrep", Kind::Tool),
+                mk("firefox", Kind::App),
+            ],
+            aur: vec![],
+        };
+        let order: Vec<String> = plan.sorted().into_iter().map(|u| u.name).collect();
+        assert_eq!(order, ["firefox", "ripgrep", "libfoo"]);
+    }
+
+    #[test]
     fn parses_pacman_qu_output() {
         let u = parse_qu_line("firefox 145.0-1 -> 146.0-1").unwrap();
         assert_eq!(u.name, "firefox");
@@ -153,16 +234,30 @@ mod tests {
     }
 
     #[test]
-    fn a_single_package_upgrade_is_never_offered() {
-        // Guards the safety decision: the only upgrade action is -Syu, because
-        // upgrading one package against an un-upgraded system is a partial
-        // upgrade, which is unsupported on Arch and breaks installs.
+    fn the_system_upgrade_never_narrows_to_a_subset() {
+        // -Syu must carry no package names: naming even one turns a full
+        // upgrade into a partial one, which is the failure the whole design is
+        // arranged around.
         let args = UpdatePlan::system_upgrade_args();
         assert_eq!(args[0], "-Syu");
         assert!(
             !args.iter().any(|a| !a.starts_with('-')),
             "no package names may appear: {args:?}"
         );
+    }
+
+    #[test]
+    fn a_single_upgrade_names_exactly_one_package() {
+        let u = Update {
+            name: "firefox".into(),
+            installed: "1".into(),
+            available: "2".into(),
+            source: UpdateSource::Repo,
+            kind: Kind::App,
+            display_name: Some("Firefox".into()),
+        };
+        let args = UpdatePlan::single_args(&u);
+        assert_eq!(args, ["-S", "--noconfirm", "firefox"]);
     }
 
     #[test]

@@ -40,8 +40,27 @@ pub struct Entry {
     pub size: Option<u64>,
 }
 
+/// Extra names to try when guessing user directories.
+///
+/// A package name is a poor guess on its own: `librewolf-bin` stores data as
+/// `librewolf`, and reverse-DNS applications use their AppStream id
+/// (`~/.config/org.kde.dolphin`). Feeding in the binary name, the desktop id
+/// and the AppStream id widens the net without loosening the labelling — every
+/// hit is still a guess.
+#[derive(Debug, Default, Clone)]
+pub struct NameHints {
+    pub binary: Option<String>,
+    pub desktop_id: Option<String>,
+    pub appstream_id: Option<String>,
+}
+
 /// Everything known about where one package's files are.
 pub fn describe(db: &LocalDb, pkg: &Package) -> Vec<Group> {
+    describe_with(db, pkg, &NameHints::default())
+}
+
+/// As `describe`, with extra naming hints for the guessed half.
+pub fn describe_with(db: &LocalDb, pkg: &Package, hints: &NameHints) -> Vec<Group> {
     let files = db.read_files(pkg).unwrap_or_default();
     let mut groups = Vec::new();
 
@@ -113,7 +132,7 @@ pub fn describe(db: &LocalDb, pkg: &Package) -> Vec<Group> {
     }
 
     // The guessed half.
-    let candidates = user_paths(&pkg.name);
+    let candidates = user_paths_with(&pkg.name, hints);
     let present: Vec<Entry> = candidates.into_iter().filter(|e| e.exists).collect();
     if !present.is_empty() {
         groups.push(Group {
@@ -160,11 +179,20 @@ fn summarise_dirs(entries: Vec<Entry>) -> Vec<Entry> {
 }
 
 /// Candidate user-level directories for a package name.
-///
-/// XDG convention only. `firefox` really does keep its profile in
-/// `~/.mozilla`, so this will miss things; it is offered as a starting point,
-/// never as an authority.
 pub fn user_paths(name: &str) -> Vec<Entry> {
+    user_paths_with(name, &NameHints::default())
+}
+
+/// Candidate user-level directories, given every name we know for a package.
+///
+/// **This is guesswork by necessity, not by laziness.** pacman records only the
+/// files it installed, and no package installs into a user's home directory —
+/// `~/.config/discord` was created by Discord at runtime. There is no command
+/// that can list these, because nothing anywhere associates them with a
+/// package. XDG naming convention is the only signal available, and it is
+/// imperfect: Firefox keeps its profile in `~/.mozilla`, which no amount of
+/// name matching will find.
+pub fn user_paths_with(name: &str, hints: &NameHints) -> Vec<Entry> {
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
         return Vec::new();
     };
@@ -182,14 +210,33 @@ pub fn user_paths(name: &str) -> Vec<Entry> {
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| home.join(".cache"));
 
-    // Also try the name with common packaging suffixes stripped: `librewolf-bin`
-    // stores its data as `librewolf`.
+    // Every name the package is known by, cheapest signal first.
     let mut names = vec![name.to_string()];
-    for suffix in ["-bin", "-git", "-appimage"] {
+    for suffix in ["-bin", "-git", "-appimage", "-electron"] {
         if let Some(base) = name.strip_suffix(suffix) {
             names.push(base.to_string());
         }
     }
+    if let Some(b) = &hints.binary {
+        names.push(b.clone());
+    }
+    if let Some(id) = &hints.appstream_id {
+        names.push(id.clone());
+        // Applications commonly use the last component too: org.kde.dolphin
+        // keeps state in ~/.local/share/dolphin.
+        if let Some(last) = id.rsplit('.').next() {
+            names.push(last.to_lowercase());
+        }
+    }
+    if let Some(d) = &hints.desktop_id {
+        let base = d.strip_suffix(".desktop").unwrap_or(d);
+        names.push(base.to_string());
+        if let Some(last) = base.rsplit('.').next() {
+            names.push(last.to_lowercase());
+        }
+    }
+    names.sort();
+    names.dedup();
 
     let mut out = Vec::new();
     for n in names {
@@ -245,6 +292,21 @@ mod tests {
         for e in user_paths("firefox") {
             assert!(e.guessed, "{} must be marked a guess", e.path);
         }
+    }
+
+    #[test]
+    fn reverse_dns_ids_widen_the_guess() {
+        let hints = NameHints {
+            appstream_id: Some("org.kde.dolphin".into()),
+            desktop_id: Some("org.kde.dolphin.desktop".into()),
+            binary: Some("dolphin".into()),
+        };
+        let paths = user_paths_with("dolphin", &hints);
+        let all: Vec<&str> = paths.iter().map(|e| e.path.as_str()).collect();
+        assert!(all.iter().any(|p| p.ends_with("/org.kde.dolphin")), "{all:?}");
+        assert!(all.iter().any(|p| p.ends_with("/dolphin")), "{all:?}");
+        // Still guesses, however many names we try.
+        assert!(paths.iter().all(|e| e.guessed));
     }
 
     #[test]

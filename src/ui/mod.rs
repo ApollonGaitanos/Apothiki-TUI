@@ -37,15 +37,18 @@ pub enum View {
     Orphans,
     /// Search and install, across repositories and the AUR.
     Search,
+    /// Everything with a newer version available.
+    Updates,
 }
 
 impl View {
-    pub const ALL: [View; 5] = [
+    pub const ALL: [View; 6] = [
         View::Apps,
         View::Tools,
         View::Dependencies,
         View::Orphans,
         View::Search,
+        View::Updates,
     ];
 
     /// Titles carry their key, because the hint bar is the discoverability
@@ -59,6 +62,7 @@ impl View {
             View::Dependencies => "3 Dependencies",
             View::Orphans => "4 Orphans",
             View::Search => "5 Search",
+            View::Updates => "6 Updates",
         }
     }
 
@@ -79,6 +83,8 @@ pub enum Item {
     Package(PkgIdx),
     /// Index into the current search results.
     Result(usize),
+    /// Index into the sorted update list.
+    Update(usize),
 }
 
 /// Which pane has keyboard focus.
@@ -193,10 +199,17 @@ pub struct Ui {
     pub results: Vec<crate::data::search::Hit>,
     /// Available updates, detected in the background.
     pub updates: crate::ops::update::UpdatePlan,
+    /// The update list as displayed: applications, then tools, then plumbing.
+    pub sorted_updates: Vec<crate::ops::update::Update>,
     updates_rx: Option<std::sync::mpsc::Receiver<crate::ops::update::UpdatePlan>>,
     /// File locations for the current selection, when the pane is open.
     pub locations: Option<(String, Vec<crate::apps::locations::Group>)>,
     pub locations_scroll: u16,
+    /// Which selectable path in the locations pane is highlighted.
+    pub locations_selected: usize,
+    /// A path the user asked to open, handled by the event loop because it has
+    /// to hand the terminal over.
+    pub pending_open: Option<std::path::PathBuf>,
     /// In-flight background reload, if any.
     reload_rx: Option<std::sync::mpsc::Receiver<anyhow::Result<SystemState>>>,
     /// Decoded icon for the current selection, with the key it was built for.
@@ -278,9 +291,12 @@ impl Ui {
             searcher: crate::data::search::Searcher::new(),
             results: Vec::new(),
             updates: Default::default(),
+            sorted_updates: Vec::new(),
             updates_rx: None,
             locations: None,
             locations_scroll: 0,
+            locations_selected: 0,
+            pending_open: None,
             reload_rx: None,
             picker,
             icon: None,
@@ -348,6 +364,10 @@ impl Ui {
                 self.refresh_results();
                 return;
             }
+            View::Updates => {
+                self.sorted_updates = self.updates.sorted();
+                (0..self.sorted_updates.len()).map(Item::Update).collect()
+            }
             View::Orphans => {
                 let mut v: Vec<Item> = self
                     .state
@@ -385,6 +405,7 @@ impl Ui {
                 let hit = self.results.get(i)?;
                 hit.installed.then(|| self.state.graph.index_of(&hit.name))?
             }
+            Item::Update(i) => self.state.graph.index_of(&self.sorted_updates.get(i)?.name),
         }
     }
 
@@ -659,10 +680,16 @@ impl Ui {
                     .to_string(),
             );
             if hit.orphaned {
-                warnings.push("Unmaintained: nobody is applying upstream fixes.".into());
+                warnings.push(
+                    "No maintainer: nobody is looking after this AUR entry.".into(),
+                );
             }
             if hit.out_of_date {
-                warnings.push("Flagged out of date by users.".into());
+                warnings.push(
+                    "Packaging is behind upstream — users flagged it as older than the \
+                     project's latest release."
+                        .into(),
+                );
             }
             if helper.is_none() {
                 warnings.push("No AUR helper found — install paru or yay first.".into());
@@ -782,6 +809,16 @@ impl Ui {
     fn start_removal(&mut self) {
         let Some(d) = &mut self.dialog else { return };
 
+        if let Some(u) = d.job.as_single_update().cloned() {
+            let (tx, rx) = std::sync::mpsc::channel();
+            removal::spawn_single_update(u, crate::ops::find_aur_helper(), d.snapshot, tx);
+            d.receiver = Some(rx);
+            d.stage = Stage::Running;
+            d.output.clear();
+            self.state.db_locked = false;
+            return;
+        }
+
         if let Some(plan) = d.job.as_update().cloned() {
             let (tx, rx) = std::sync::mpsc::channel();
             removal::spawn_update(plan, crate::ops::find_aur_helper(), d.snapshot, tx);
@@ -900,6 +937,62 @@ impl Ui {
             .map(|p| p.name.clone())
             .collect();
         self.updates.aur = crate::ops::update::aur_updates(&self.state.db, aur, &foreign);
+        self.classify_updates();
+    }
+
+    /// Labels each update as an application, a tool, or plumbing.
+    ///
+    /// The same package means different things to different people: `firefox`
+    /// is an application, `ripgrep` a tool, `libvorbis` an implementation
+    /// detail. Sorting by that is what makes a list of updates readable.
+    fn classify_updates(&mut self) {
+        use crate::ops::update::Kind;
+
+        let app_of: HashMap<&str, &str> = self
+            .state
+            .catalog
+            .apps
+            .iter()
+            .flat_map(|a| a.packages.iter().map(move |p| (p.as_str(), a.name.as_str())))
+            .collect();
+        let tools: std::collections::HashSet<&str> = self
+            .state
+            .catalog
+            .tools
+            .iter()
+            .flat_map(|t| t.packages.iter().map(|p| p.as_str()))
+            .collect();
+
+        for u in self.updates.repo.iter_mut().chain(self.updates.aur.iter_mut()) {
+            if let Some(app) = app_of.get(u.name.as_str()) {
+                u.kind = Kind::App;
+                u.display_name = Some((*app).to_string());
+            } else if tools.contains(u.name.as_str()) {
+                u.kind = Kind::Tool;
+            } else {
+                u.kind = Kind::Package;
+            }
+        }
+        self.sorted_updates = self.updates.sorted();
+        if self.view == View::Updates {
+            self.rebuild_rows();
+        }
+    }
+
+    /// The update under the cursor in the Updates view.
+    pub fn selected_update(&self) -> Option<&crate::ops::update::Update> {
+        match self.current()? {
+            Item::Update(i) => self.sorted_updates.get(i),
+            _ => None,
+        }
+    }
+
+    /// Opens the dialog for a single package upgrade.
+    fn open_single_update(&mut self) {
+        let Some(u) = self.selected_update().cloned() else {
+            return;
+        };
+        self.dialog = Some(RemovalDialog::single_update(u));
     }
 
     /// Opens the update dialog.
@@ -925,6 +1018,22 @@ impl Ui {
         let groups = crate::apps::locations::describe(&self.state.db, pkg);
         self.locations = Some((pkg.name.clone(), groups));
         self.locations_scroll = 0;
+        self.locations_selected = 0;
+    }
+
+    /// Every selectable path in the locations pane, in display order.
+    pub fn location_paths(&self) -> Vec<String> {
+        let Some((_, groups)) = &self.locations else {
+            return Vec::new();
+        };
+        groups
+            .iter()
+            .flat_map(|g| g.paths.iter())
+            // Only paths that exist can be opened; a `.pacsave` that was never
+            // created is listed for information, not as a target.
+            .filter(|e| e.exists)
+            .map(|e| strip_annotation(&e.path))
+            .collect()
     }
 
     /// Re-runs the search for the current query.
@@ -985,6 +1094,11 @@ impl Ui {
                 .get(i)
                 .map(|h| h.name.clone())
                 .unwrap_or_default(),
+            Item::Update(i) => self
+                .sorted_updates
+                .get(i)
+                .map(|u| u.name.clone())
+                .unwrap_or_default(),
         });
 
         let d = Self::derive(&state);
@@ -1006,6 +1120,7 @@ impl Ui {
                 Item::Tool(i) => self.state.catalog.tools[*i].name == name,
                 Item::Package(p) => self.state.graph.name(*p) == name,
                 Item::Result(i) => self.results.get(*i).is_some_and(|h| h.name == name),
+                Item::Update(i) => self.sorted_updates.get(*i).is_some_and(|u| u.name == name),
             }) {
                 self.set_selection(row);
             } else {
@@ -1082,6 +1197,7 @@ impl Ui {
                 self.updates = plan;
                 self.updates_rx = None;
                 self.detect_aur_updates();
+                self.classify_updates();
             }
         }
 
@@ -1245,13 +1361,21 @@ impl Ui {
         }
 
         if self.locations.is_some() {
+            let count = self.location_paths().len();
             match key.code {
-                KeyCode::Down => self.locations_scroll = self.locations_scroll.saturating_add(1),
-                KeyCode::Up => self.locations_scroll = self.locations_scroll.saturating_sub(1),
+                KeyCode::Down => {
+                    self.locations_selected = (self.locations_selected + 1).min(count.saturating_sub(1));
+                }
+                KeyCode::Up => self.locations_selected = self.locations_selected.saturating_sub(1),
                 KeyCode::PageDown => {
                     self.locations_scroll = self.locations_scroll.saturating_add(10)
                 }
                 KeyCode::PageUp => self.locations_scroll = self.locations_scroll.saturating_sub(10),
+                KeyCode::Enter | KeyCode::Right => {
+                    if let Some(path) = self.location_paths().get(self.locations_selected) {
+                        self.pending_open = Some(std::path::PathBuf::from(path));
+                    }
+                }
                 KeyCode::Char('q') if !ctrl => self.should_quit = true,
                 _ => self.locations = None,
             }
@@ -1275,6 +1399,7 @@ impl Ui {
             KeyCode::F(4) => self.switch_view(View::Dependencies),
             KeyCode::F(6) => self.switch_view(View::Orphans),
             KeyCode::Char('5') => self.switch_view(View::Search),
+            KeyCode::Char('6') => self.switch_view(View::Updates),
             KeyCode::F(7) => self.switch_view(View::Search),
             KeyCode::F(5) => self.start_reload(),
 
@@ -1366,6 +1491,10 @@ impl Ui {
             self.open_install();
             return;
         }
+        if self.view == View::Updates && self.focus == Focus::List {
+            self.open_single_update();
+            return;
+        }
         match self.focus {
             Focus::List => {
                 // Land on the first relationship rather than the removal action,
@@ -1404,6 +1533,41 @@ impl Ui {
             Source::Unowned => "unknown origin",
         }
     }
+}
+
+/// Removes the trailing `  (12 files)` annotation from a summarised directory.
+fn strip_annotation(path: &str) -> String {
+    path.split("  (").next().unwrap_or(path).trim_end_matches('/').to_string()
+}
+
+/// Opens a path the way a desktop would.
+///
+/// Directories and anything non-textual go to `xdg-open`, detached, so the TUI
+/// stays put. A regular file opens in `$EDITOR` with the terminal handed over,
+/// because that is the only way an editor can work.
+fn open_path(path: &std::path::Path) -> Result<(), String> {
+    let is_dir = path.is_dir();
+    let editor = std::env::var("EDITOR").or_else(|_| std::env::var("VISUAL"));
+
+    if is_dir || editor.is_err() {
+        return std::process::Command::new("xdg-open")
+            .arg(path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("could not open: {e}"));
+    }
+
+    let editor = editor.unwrap_or_else(|_| "vi".into());
+    term::suspended(|| {
+        std::process::Command::new(&editor)
+            .arg(path)
+            .status()
+            .map(|_| ())
+            .map_err(|e| format!("could not run {editor}: {e}"))
+    })
 }
 
 /// Determines how to render images, without disturbing terminal input.
@@ -1492,6 +1656,15 @@ pub fn run(state: SystemState) -> anyhow::Result<()> {
                 Event::Resize(_, _) => {}
                 _ => {}
             }
+        }
+
+        // Opening a file may hand the terminal to an editor, so it happens here
+        // rather than inside key handling, and the screen is rebuilt afterwards.
+        if let Some(path) = ui.pending_open.take() {
+            if let Err(e) = open_path(&path) {
+                ui.notice = Some(e);
+            }
+            terminal.clear()?;
         } else if !ui.operation_running() {
             // Only when the lock is not ours: during our own removal pacman
             // holds it, and warning the user that "another pacman is running"

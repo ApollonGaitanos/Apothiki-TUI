@@ -43,6 +43,22 @@ impl Drop for Guard {
     }
 }
 
+/// Runs a command with the terminal handed back to it, then restores the TUI.
+///
+/// Editors need the real terminal: they set their own raw mode, draw their own
+/// screen, and read keys directly. Trying to proxy that through the TUI would be
+/// reimplementing a terminal emulator. Leaving and returning is what every other
+/// program does for this, and it is exactly right here.
+pub fn suspended<T>(f: impl FnOnce() -> T) -> T {
+    restore();
+    let result = f();
+    // Re-entering can fail if the terminal went away; the caller is exiting in
+    // that case anyway.
+    let _ = enable_raw_mode();
+    let _ = execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture);
+    result
+}
+
 /// Enters the alternate screen and raw mode.
 ///
 /// Reports whether the Kitty keyboard protocol is available. It is not on the

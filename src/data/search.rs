@@ -33,7 +33,12 @@ pub struct Hit {
     pub repo: Option<String>,
     pub installed: bool,
     pub votes: u32,
+    /// The AUR's `OutOfDate` flag: **users have reported that the packaging is
+    /// behind upstream**. It says nothing about whether *your* system needs an
+    /// update — that is a separate question answered by `ops::update`.
     pub out_of_date: bool,
+    /// No maintainer. Nobody is updating the packaging or fixing it when it
+    /// stops building.
     pub orphaned: bool,
     score: u32,
     tier: Tier,
