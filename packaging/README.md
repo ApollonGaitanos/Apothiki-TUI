@@ -51,23 +51,17 @@ after the *repository* (`Apothiki-TUI-0.1.0`), not the package (`apothiki`).
 ## 4. Publish to the AUR
 
 This is the "one command" step. It needs an account at
-<https://aur.archlinux.org> with your SSH public key added under *My Account*.
+<https://aur.archlinux.org> with your SSH public key added under *My Account*
+— the AUR authenticates by key alone, and refuses the push otherwise.
 
 ```sh
-cd packaging
-makepkg --printsrcinfo > .SRCINFO
-
-git clone ssh://aur@aur.archlinux.org/apothiki.git /tmp/aur-apothiki
-cp PKGBUILD .SRCINFO /tmp/aur-apothiki/
-cd /tmp/aur-apothiki
-git add PKGBUILD .SRCINFO
-git commit -m "apothiki 0.1.0: initial release"
-git push
+cd packaging && ./publish-aur.sh
 ```
 
-The clone of a not-yet-existing package succeeds and is empty; the first push
-creates it. `.SRCINFO` must be regenerated and committed on **every** change —
-the AUR rejects a push whose `.SRCINFO` disagrees with the `PKGBUILD`.
+The script checks the key first, regenerates `.SRCINFO`, refuses to publish a
+PKGBUILD still carrying `sha256sums=('SKIP')`, then clones, commits and pushes.
+Cloning a package that does not exist yet succeeds and gives an empty
+repository; the first push creates it.
 
 Then, from anywhere:
 
