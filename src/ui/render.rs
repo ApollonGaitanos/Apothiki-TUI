@@ -861,7 +861,7 @@ fn draw_install_confirm(f: &mut Frame, popup: Rect, request: &crate::ops::Instal
 
     lines.push(Line::raw(""));
     lines.push(Line::styled(
-        format!("$ {}", request.command_line()),
+        format!("$ {}", request.command_line(false)),
         Style::default().fg(DIM()),
     ));
     lines.push(Line::raw(""));

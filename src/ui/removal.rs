@@ -617,12 +617,14 @@ pub fn spawn_single_update(
     update: crate::ops::update::Update,
     helper: Option<String>,
     take_snapshot: bool,
+    interactive: bool,
+    input: Receiver<String>,
     tx: Sender<Output>,
 ) {
     use crate::ops::update::{UpdatePlan, UpdateSource};
 
     std::thread::spawn(move || {
-        let args = UpdatePlan::single_args(&update);
+        let args = UpdatePlan::single_args(&update, !interactive);
 
         if dry_run_mode() {
             let _ = tx.send(Output::Line("APOTHIKI_DRY_RUN is set — nothing will change".into()));
@@ -649,9 +651,21 @@ pub fn spawn_single_update(
             }
         }
 
-        let result = match update.source {
-            UpdateSource::Repo => exec::run_privileged("pacman", &args, &tx),
-            UpdateSource::Aur => {
+        let slot = exec::stdin_slot();
+        if interactive {
+            exec::spawn_answer_writer(input, slot.clone());
+        }
+
+        let result = match (update.source, interactive) {
+            (UpdateSource::Repo, true) => {
+                exec::run_privileged_interactive("pacman", &args, &slot, &tx)
+            }
+            (UpdateSource::Repo, false) => exec::run_privileged("pacman", &args, &tx),
+            (UpdateSource::Aur, true) => {
+                let h = helper.unwrap_or_else(|| "paru".into());
+                exec::run_unprivileged_interactive(&h, &args, &slot, &tx)
+            }
+            (UpdateSource::Aur, false) => {
                 let h = helper.unwrap_or_else(|| "paru".into());
                 exec::run_unprivileged(&h, &args, &tx)
             }
@@ -709,7 +723,7 @@ pub fn spawn_update(
                 let _ = tx.send(Output::Line(format!(
                     "would then run: {} {}",
                     helper.clone().unwrap_or_else(|| "paru".into()),
-                    UpdatePlan::aur_upgrade_args(true).join(" ")
+                    UpdatePlan::aur_upgrade_args(!interactive).join(" ")
                 )));
             }
             let _ = tx.send(Output::Finished { success: true, code: Some(0) });
@@ -731,11 +745,18 @@ pub fn spawn_update(
             }
         }
 
+        // One writer serves the whole operation, so the AUR rebuild that
+        // follows can be answered too.
+        let slot = exec::stdin_slot();
+        if interactive {
+            exec::spawn_answer_writer(input, slot.clone());
+        }
+
         let repo = if interactive {
             exec::run_privileged_interactive(
                 "pacman",
                 &UpdatePlan::system_upgrade_args(false),
-                input,
+                &slot,
                 &tx,
             )
         } else {
@@ -748,10 +769,20 @@ pub fn spawn_update(
         // exists to avoid.
         if success && !plan.aur.is_empty() {
             if let Some(h) = &helper {
-                // The helper's own prompts cannot be forwarded once the repo
-                // upgrade has consumed the input channel, so this half stays
-                // non-interactive for now and says so.
-                let aur = exec::run_unprivileged(h, &UpdatePlan::aur_upgrade_args(true), &tx);
+                // `paru --noconfirm` refuses outright when a conflict needs a
+                // decision — "can not install conflicting packages with
+                // --noconfirm" — so this half is answered the same way as the
+                // repository half rather than being told to guess.
+                let aur = if interactive {
+                    exec::run_unprivileged_interactive(
+                        h,
+                        &UpdatePlan::aur_upgrade_args(false),
+                        &slot,
+                        &tx,
+                    )
+                } else {
+                    exec::run_unprivileged(h, &UpdatePlan::aur_upgrade_args(true), &tx)
+                };
                 success = aur.success;
             } else {
                 let _ = tx.send(Output::Line(
@@ -789,24 +820,45 @@ pub fn spawn_update(
 /// untrusted source, and building it as root is how a malicious PKGBUILD owns
 /// the machine. The helper escalates on its own for the final install step,
 /// which succeeds without prompting because we pre-authenticated.
-pub fn spawn_install(request: crate::ops::InstallRequest, tx: Sender<Output>) {
+pub fn spawn_install(
+    request: crate::ops::InstallRequest,
+    interactive: bool,
+    input: Receiver<String>,
+    tx: Sender<Output>,
+) {
     std::thread::spawn(move || {
         if dry_run_mode() {
             let _ = tx.send(Output::Line(
                 "APOTHIKI_DRY_RUN is set — nothing will be installed".into(),
             ));
-            let _ = tx.send(Output::Line(format!("would run: {}", request.command_line())));
+            let _ = tx.send(Output::Line(format!(
+                "would run: {}",
+                request.command_line(!interactive)
+            )));
             let _ = tx.send(Output::Finished { success: true, code: Some(0) });
             return;
         }
 
-        let result = match request.source {
-            crate::ops::InstallSource::Repo => {
-                exec::run_privileged("pacman", &request.args(), &tx)
+        let slot = exec::stdin_slot();
+        if interactive {
+            exec::spawn_answer_writer(input, slot.clone());
+        }
+        let args = request.args(!interactive);
+
+        let result = match (request.source, interactive) {
+            (crate::ops::InstallSource::Repo, true) => {
+                exec::run_privileged_interactive("pacman", &args, &slot, &tx)
             }
-            crate::ops::InstallSource::Aur => {
+            (crate::ops::InstallSource::Repo, false) => {
+                exec::run_privileged("pacman", &args, &tx)
+            }
+            (crate::ops::InstallSource::Aur, interactive) => {
                 let helper = request.helper.clone().unwrap_or_else(|| "paru".into());
-                exec::run_unprivileged(&helper, &request.args(), &tx)
+                if interactive {
+                    exec::run_unprivileged_interactive(&helper, &args, &slot, &tx)
+                } else {
+                    exec::run_unprivileged(&helper, &args, &tx)
+                }
             }
         };
 

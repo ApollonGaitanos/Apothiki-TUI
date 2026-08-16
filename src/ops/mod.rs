@@ -127,21 +127,26 @@ pub struct InstallRequest {
 }
 
 impl InstallRequest {
-    pub fn args(&self) -> Vec<String> {
-        vec![
-            "-S".to_string(),
-            "--noconfirm".to_string(),
-            self.package.clone(),
-        ]
+    /// `--noconfirm` is optional for the same reason it is on upgrades: an AUR
+    /// helper told not to ask refuses outright when a conflict needs deciding
+    /// ("can not install conflicting packages with --noconfirm") rather than
+    /// picking something reasonable.
+    pub fn args(&self, noconfirm: bool) -> Vec<String> {
+        let mut v = vec!["-S".to_string()];
+        if noconfirm {
+            v.push("--noconfirm".to_string());
+        }
+        v.push(self.package.clone());
+        v
     }
 
-    pub fn command_line(&self) -> String {
+    pub fn command_line(&self, noconfirm: bool) -> String {
         match self.source {
-            InstallSource::Repo => format!("sudo pacman {}", self.args().join(" ")),
+            InstallSource::Repo => format!("sudo pacman {}", self.args(noconfirm).join(" ")),
             InstallSource::Aur => format!(
                 "{} {}",
                 self.helper.clone().unwrap_or_else(|| "paru".into()),
-                self.args().join(" ")
+                self.args(noconfirm).join(" ")
             ),
         }
     }

@@ -170,6 +170,41 @@ pub fn run_privileged(program: &str, args: &[String], tx: &Sender<Output>) -> Ru
     run_inner(program, args, true, None, tx)
 }
 
+/// The stdin of whichever command is currently running.
+///
+/// An operation can be several commands in sequence — a repository upgrade,
+/// then an AUR rebuild — and the user has one place to type. A per-command
+/// channel cannot express that: the first command's writer thread owns the
+/// receiver and blocks on it forever, so the second command gets nothing and
+/// falls back to `--noconfirm`, which is what made `paru` abort on a conflict.
+///
+/// So the answers channel is drained by a single writer for the whole
+/// operation, and each command in turn publishes its stdin here.
+pub type StdinSlot = std::sync::Arc<std::sync::Mutex<Option<std::process::ChildStdin>>>;
+
+pub fn stdin_slot() -> StdinSlot {
+    Default::default()
+}
+
+/// Starts the one writer thread that serves every command in an operation.
+pub fn spawn_answer_writer(rx: Receiver<String>, slot: StdinSlot) {
+    std::thread::spawn(move || {
+        for line in rx {
+            let Ok(mut guard) = slot.lock() else { return };
+            if let Some(stdin) = guard.as_mut() {
+                if stdin.write_all(line.as_bytes()).is_err()
+                    || stdin.write_all(b"\n").is_err()
+                    || stdin.flush().is_err()
+                {
+                    // The command exited between the prompt and the answer;
+                    // the next one will publish a fresh stdin.
+                    *guard = None;
+                }
+            }
+        }
+    });
+}
+
 /// As `run_privileged`, but with a channel feeding the command's stdin.
 ///
 /// This is what makes `pacman -Syu` usable without `--noconfirm`: pacman asks
@@ -180,19 +215,19 @@ pub fn run_privileged(program: &str, args: &[String], tx: &Sender<Output>) -> Ru
 pub fn run_privileged_interactive(
     program: &str,
     args: &[String],
-    input: Receiver<String>,
+    slot: &StdinSlot,
     tx: &Sender<Output>,
 ) -> RunResult {
-    run_inner(program, args, true, Some(input), tx)
+    run_inner(program, args, true, Some(slot), tx)
 }
 
 pub fn run_unprivileged_interactive(
     program: &str,
     args: &[String],
-    input: Receiver<String>,
+    slot: &StdinSlot,
     tx: &Sender<Output>,
 ) -> RunResult {
-    run_inner(program, args, false, Some(input), tx)
+    run_inner(program, args, false, Some(slot), tx)
 }
 
 /// Streams a child's output, optionally feeding it input.
@@ -200,7 +235,7 @@ fn run_inner(
     program: &str,
     args: &[String],
     privileged: bool,
-    input: Option<Receiver<String>>,
+    slot: Option<&StdinSlot>,
     tx: &Sender<Output>,
 ) -> RunResult {
     let (cmd, full): (&str, Vec<String>) = if privileged {
@@ -213,7 +248,7 @@ fn run_inner(
 
     let child = Command::new(cmd)
         .args(&full)
-        .stdin(if input.is_some() {
+        .stdin(if slot.is_some() {
             Stdio::piped()
         } else {
             Stdio::null()
@@ -235,17 +270,11 @@ fn run_inner(
         }
     };
 
-    // Answers are written from their own thread so a user who types nothing
-    // never blocks the readers.
-    if let (Some(rx), Some(mut stdin)) = (input, child.stdin.take()) {
-        std::thread::spawn(move || {
-            for line in rx {
-                if stdin.write_all(line.as_bytes()).is_err() || stdin.write_all(b"\n").is_err() {
-                    return;
-                }
-                let _ = stdin.flush();
-            }
-        });
+    // Publish this command's stdin for the operation's writer thread.
+    if let (Some(slot), Some(stdin)) = (slot, child.stdin.take()) {
+        if let Ok(mut guard) = slot.lock() {
+            *guard = Some(stdin);
+        }
     }
 
     let mut lines: Vec<String> = Vec::new();
@@ -264,6 +293,14 @@ fn run_inner(
     if let Some(h) = err_handle {
         if let Ok(collected) = h.join() {
             lines.extend(collected);
+        }
+    }
+
+    // Closing stdin lets a command that is still reading finish, and stops the
+    // next command inheriting a stale handle.
+    if let Some(slot) = slot {
+        if let Ok(mut guard) = slot.lock() {
+            *guard = None;
         }
     }
 
@@ -454,6 +491,8 @@ mod interactive_tests {
         // instantly is no better a test, because the prompt and the echo then
         // arrive in a single read and the partial state is never observed. A
         // real user takes a moment, and that moment is the thing under test.
+        let slot = stdin_slot();
+        spawn_answer_writer(irx, slot.clone());
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(150));
             let _ = itx.send("yes".to_string());
@@ -468,7 +507,7 @@ mod interactive_tests {
                 "printf ':: Proceed? [Y/n] '; read a; echo \"got:$a\"".to_string(),
             ],
             false,
-            Some(irx),
+            Some(&slot),
             &tx,
         );
         assert!(result.success);
@@ -483,6 +522,38 @@ mod interactive_tests {
             result.lines.iter().any(|l| l.contains("got:yes")),
             "the answer must reach the command's stdin: {:?}",
             result.lines
+        );
+    }
+
+    /// Two commands in sequence must both be answerable.
+    ///
+    /// This is the case that broke a real upgrade: `pacman -Syu` succeeded
+    /// interactively, then `paru -Sua` ran with `--noconfirm` because the
+    /// answers channel had already been consumed, and paru refused the conflict
+    /// outright rather than asking.
+    #[test]
+    fn a_second_command_can_still_be_answered() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let (itx, irx) = std::sync::mpsc::channel();
+        let slot = stdin_slot();
+        spawn_answer_writer(irx, slot.clone());
+
+        std::thread::spawn(move || {
+            for answer in ["first", "second"] {
+                std::thread::sleep(std::time::Duration::from_millis(120));
+                let _ = itx.send(answer.to_string());
+            }
+        });
+
+        let script = "read a; echo \"got:$a\"".to_string();
+        let one = run_inner("sh", &["-c".to_string(), script.clone()], false, Some(&slot), &tx);
+        let two = run_inner("sh", &["-c".to_string(), script], false, Some(&slot), &tx);
+
+        assert!(one.lines.iter().any(|l| l.contains("got:first")), "{:?}", one.lines);
+        assert!(
+            two.lines.iter().any(|l| l.contains("got:second")),
+            "the second command must reach the same answers channel: {:?}",
+            two.lines
         );
     }
 

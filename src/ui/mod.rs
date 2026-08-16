@@ -946,7 +946,16 @@ impl Ui {
 
         if let Some(u) = d.job.as_single_update().cloned() {
             let (tx, rx) = std::sync::mpsc::channel();
-            removal::spawn_single_update(u, crate::ops::find_aur_helper(), d.snapshot, tx);
+            let (itx, irx) = std::sync::mpsc::channel();
+            d.input = Some(itx);
+            removal::spawn_single_update(
+                u,
+                crate::ops::find_aur_helper(),
+                d.snapshot,
+                true,
+                irx,
+                tx,
+            );
             d.receiver = Some(rx);
             d.stage = Stage::Running;
             d.output.clear();
@@ -981,7 +990,11 @@ impl Ui {
 
         if let Some(request) = d.job.as_install().cloned() {
             let (tx, rx) = std::sync::mpsc::channel();
-            removal::spawn_install(request, tx);
+            let (itx, irx) = std::sync::mpsc::channel();
+            d.input = Some(itx);
+            // Installs are interactive too: a helper told not to ask refuses a
+            // conflict outright instead of letting the user decide.
+            removal::spawn_install(request, true, irx, tx);
             d.receiver = Some(rx);
             d.stage = Stage::Running;
             d.output.clear();

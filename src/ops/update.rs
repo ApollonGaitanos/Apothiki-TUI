@@ -85,12 +85,13 @@ impl UpdatePlan {
     /// for a repository package this is a partial upgrade, which is the classic
     /// way to break a rolling install. An AUR rebuild is safer in itself but can
     /// still pull repository dependencies forward, so the warning stands.
-    pub fn single_args(update: &Update) -> Vec<String> {
-        vec![
-            "-S".to_string(),
-            "--noconfirm".to_string(),
-            update.name.clone(),
-        ]
+    pub fn single_args(update: &Update, noconfirm: bool) -> Vec<String> {
+        let mut v = vec!["-S".to_string()];
+        if noconfirm {
+            v.push("--noconfirm".to_string());
+        }
+        v.push(update.name.clone());
+        v
     }
 
     pub fn total(&self) -> usize {
@@ -281,8 +282,11 @@ mod tests {
             kind: Kind::App,
             display_name: Some("Firefox".into()),
         };
-        let args = UpdatePlan::single_args(&u);
-        assert_eq!(args, ["-S", "--noconfirm", "firefox"]);
+        assert_eq!(
+            UpdatePlan::single_args(&u, true),
+            ["-S", "--noconfirm", "firefox"]
+        );
+        assert_eq!(UpdatePlan::single_args(&u, false), ["-S", "firefox"]);
     }
 
     #[test]
