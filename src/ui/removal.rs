@@ -166,6 +166,11 @@ pub struct RemovalDialog {
     pub answer: String,
     /// Sends answers to the running command's stdin, when it is interactive.
     pub input: Option<Sender<String>>,
+    /// The running command, so it can be interrupted.
+    pub pids: crate::ops::exec::PidSlot,
+    /// Set once an interrupt has been requested, so the dialog can say so
+    /// rather than looking like the key did nothing.
+    pub interrupted: bool,
     /// Whether to let pacman ask its own questions rather than passing
     /// `--noconfirm`. On for upgrades, where replacements and conflicts are
     /// common and the default answer aborts the transaction.
@@ -201,6 +206,8 @@ impl RemovalDialog {
             partial_err: String::new(),
             answer: String::new(),
             input: None,
+            pids: crate::ops::exec::pid_slot(),
+            interrupted: false,
             interactive: false,
         }
     }
@@ -227,6 +234,8 @@ impl RemovalDialog {
             partial_err: String::new(),
             answer: String::new(),
             input: None,
+            pids: crate::ops::exec::pid_slot(),
+            interrupted: false,
             interactive: false,
         }
     }
@@ -316,6 +325,8 @@ impl RemovalDialog {
             partial_err: String::new(),
             answer: String::new(),
             input: None,
+            pids: crate::ops::exec::pid_slot(),
+            interrupted: false,
             interactive: false,
         }
     }
@@ -352,6 +363,8 @@ impl RemovalDialog {
             partial_err: String::new(),
             answer: String::new(),
             input: None,
+            pids: crate::ops::exec::pid_slot(),
+            interrupted: false,
             interactive: false,
         }
     }
@@ -377,6 +390,8 @@ impl RemovalDialog {
             partial_err: String::new(),
             answer: String::new(),
             input: None,
+            pids: crate::ops::exec::pid_slot(),
+            interrupted: false,
             interactive: false,
         }
     }
@@ -402,6 +417,8 @@ impl RemovalDialog {
             partial_err: String::new(),
             answer: String::new(),
             input: None,
+            pids: crate::ops::exec::pid_slot(),
+            interrupted: false,
             interactive: false,
         }
     }
@@ -543,6 +560,7 @@ pub fn verify_against_pacman(
 /// people to type it without thinking.
 pub fn spawn_flatpak_removal(
     removal: crate::ops::bundle::FlatpakRemoval,
+    pids: crate::ops::exec::PidSlot,
     tx: Sender<Output>,
 ) {
     std::thread::spawn(move || {
@@ -555,9 +573,9 @@ pub fn spawn_flatpak_removal(
 
         let run = |args: &[String], tx: &Sender<Output>| {
             if removal.needs_privileges() {
-                exec::run_privileged("flatpak", args, tx)
+                exec::run_privileged_tracked("flatpak", args, &pids, tx)
             } else {
-                exec::run_unprivileged("flatpak", args, tx)
+                exec::run_unprivileged_tracked("flatpak", args, &pids, tx)
             }
         };
 
@@ -641,6 +659,7 @@ pub fn spawn_single_update(
     take_snapshot: bool,
     interactive: bool,
     input: Receiver<String>,
+    pids: crate::ops::exec::PidSlot,
     tx: Sender<Output>,
 ) {
     use crate::ops::update::{UpdatePlan, UpdateSource};
@@ -662,7 +681,7 @@ pub fn spawn_single_update(
                     &format!("apothiki: upgrade {}", update.name),
                 );
                 let _ = tx.send(Output::info("taking snapshot…"));
-                if !exec::run_privileged("snapper", &sargs, &tx).success {
+                if !exec::run_privileged_tracked("snapper", &sargs, &pids, &tx).success {
                     let _ = tx.send(Output::Failed(
                         "snapshot failed — upgrade aborted (uncheck the snapshot option to \
                          proceed without one)"
@@ -680,16 +699,16 @@ pub fn spawn_single_update(
 
         let result = match (update.source, interactive) {
             (UpdateSource::Repo, true) => {
-                exec::run_privileged_interactive("pacman", &args, &slot, &tx)
+                exec::run_privileged_interactive("pacman", &args, &slot, &pids, &tx)
             }
-            (UpdateSource::Repo, false) => exec::run_privileged("pacman", &args, &tx),
+            (UpdateSource::Repo, false) => exec::run_privileged_tracked("pacman", &args, &pids, &tx),
             (UpdateSource::Aur, true) => {
                 let h = helper.unwrap_or_else(|| "paru".into());
-                exec::run_unprivileged_interactive(&h, &args, &slot, &tx)
+                exec::run_unprivileged_interactive(&h, &args, &slot, &pids, &tx)
             }
             (UpdateSource::Aur, false) => {
                 let h = helper.unwrap_or_else(|| "paru".into());
-                exec::run_unprivileged(&h, &args, &tx)
+                exec::run_unprivileged_tracked(&h, &args, &pids, &tx)
             }
         };
 
@@ -724,6 +743,7 @@ pub fn spawn_update(
     take_snapshot: bool,
     interactive: bool,
     input: Receiver<String>,
+    pids: crate::ops::exec::PidSlot,
     tx: Sender<Output>,
 ) {
     use crate::ops::update::UpdatePlan;
@@ -756,7 +776,7 @@ pub fn spawn_update(
             if let Some(config) = snapshot::config_name() {
                 let args = snapshot::pre_snapshot_args(&config, "apothiki: system upgrade");
                 let _ = tx.send(Output::info("taking snapshot…"));
-                if !exec::run_privileged("snapper", &args, &tx).success {
+                if !exec::run_privileged_tracked("snapper", &args, &pids, &tx).success {
                     let _ = tx.send(Output::Failed(
                         "snapshot failed — upgrade aborted (uncheck the snapshot option to \
                          proceed without one)"
@@ -779,10 +799,11 @@ pub fn spawn_update(
                 "pacman",
                 &UpdatePlan::system_upgrade_args(false),
                 &slot,
+                &pids,
                 &tx,
             )
         } else {
-            exec::run_privileged("pacman", &UpdatePlan::system_upgrade_args(true), &tx)
+            exec::run_privileged_tracked("pacman", &UpdatePlan::system_upgrade_args(true), &pids, &tx)
         };
         let mut success = repo.success;
 
@@ -800,10 +821,11 @@ pub fn spawn_update(
                         h,
                         &UpdatePlan::aur_upgrade_args(false),
                         &slot,
+                        &pids,
                         &tx,
                     )
                 } else {
-                    exec::run_unprivileged(h, &UpdatePlan::aur_upgrade_args(true), &tx)
+                    exec::run_unprivileged_tracked(h, &UpdatePlan::aur_upgrade_args(true), &pids, &tx)
                 };
                 success = aur.success;
             } else {
@@ -846,6 +868,7 @@ pub fn spawn_install(
     request: crate::ops::InstallRequest,
     interactive: bool,
     input: Receiver<String>,
+    pids: crate::ops::exec::PidSlot,
     tx: Sender<Output>,
 ) {
     std::thread::spawn(move || {
@@ -869,17 +892,17 @@ pub fn spawn_install(
 
         let result = match (request.source, interactive) {
             (crate::ops::InstallSource::Repo, true) => {
-                exec::run_privileged_interactive("pacman", &args, &slot, &tx)
+                exec::run_privileged_interactive("pacman", &args, &slot, &pids, &tx)
             }
             (crate::ops::InstallSource::Repo, false) => {
-                exec::run_privileged("pacman", &args, &tx)
+                exec::run_privileged_tracked("pacman", &args, &pids, &tx)
             }
             (crate::ops::InstallSource::Aur, interactive) => {
                 let helper = request.helper.clone().unwrap_or_else(|| "paru".into());
                 if interactive {
-                    exec::run_unprivileged_interactive(&helper, &args, &slot, &tx)
+                    exec::run_unprivileged_interactive(&helper, &args, &slot, &pids, &tx)
                 } else {
-                    exec::run_unprivileged(&helper, &args, &tx)
+                    exec::run_unprivileged_tracked(&helper, &args, &pids, &tx)
                 }
             }
         };
@@ -908,7 +931,11 @@ pub fn spawn_install(
 /// Deliberately simpler than the removal path: no snapshot, because putting
 /// packages back is not the operation that needs undoing, and every file comes
 /// from the local cache so nothing is fetched.
-pub fn spawn_restore(plan: crate::ops::restore::RestorePlan, tx: Sender<Output>) {
+pub fn spawn_restore(
+    plan: crate::ops::restore::RestorePlan,
+    pids: crate::ops::exec::PidSlot,
+    tx: Sender<Output>,
+) {
     std::thread::spawn(move || {
         if dry_run_mode() {
             let _ = tx.send(Output::info(
@@ -919,7 +946,7 @@ pub fn spawn_restore(plan: crate::ops::restore::RestorePlan, tx: Sender<Output>)
             return;
         }
 
-        let result = exec::run_privileged("pacman", &plan.args(), &tx);
+        let result = exec::run_privileged_tracked("pacman", &plan.args(), &pids, &tx);
         let success = result.success;
         let _ = tx.send(Output::Finished {
             success,
@@ -953,6 +980,7 @@ pub fn spawn(
     versions: Vec<(String, String)>,
     mode: RemovalMode,
     take_snapshot: bool,
+    pids: crate::ops::exec::PidSlot,
     tx: Sender<Output>,
 ) {
     std::thread::spawn(move || {
@@ -993,7 +1021,7 @@ pub fn spawn(
                 let desc = format!("apothiki: {} {}", mode.flags(), packages.join(" "));
                 let args = snapshot::pre_snapshot_args(&config, &desc);
                 let _ = tx.send(Output::info("taking snapshot…"));
-                let result = exec::run_privileged("snapper", &args, &tx);
+                let result = exec::run_privileged_tracked("snapper", &args, &pids, &tx);
 
                 // `--print-number` writes the new snapshot's id on its own line.
                 snapshot_id = result
@@ -1016,7 +1044,7 @@ pub fn spawn(
             }
         }
 
-        let result = exec::run_privileged("pacman", &mode.args(&packages), &tx);
+        let result = exec::run_privileged_tracked("pacman", &mode.args(&packages), &pids, &tx);
         let success = result.success;
         let _ = tx.send(Output::Finished {
             success,

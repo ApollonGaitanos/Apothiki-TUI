@@ -926,7 +926,7 @@ impl Ui {
 
         if let Some(r) = d.job.as_flatpak().cloned() {
             let (tx, rx) = std::sync::mpsc::channel();
-            removal::spawn_flatpak_removal(r, tx);
+            removal::spawn_flatpak_removal(r, d.pids.clone(), tx);
             d.receiver = Some(rx);
             d.stage = Stage::Running;
             d.output.clear();
@@ -954,6 +954,7 @@ impl Ui {
                 d.snapshot,
                 true,
                 irx,
+                d.pids.clone(),
                 tx,
             );
             d.receiver = Some(rx);
@@ -975,6 +976,7 @@ impl Ui {
                 d.snapshot,
                 interactive,
                 irx,
+                d.pids.clone(),
                 tx,
             );
             if interactive {
@@ -994,7 +996,7 @@ impl Ui {
             d.input = Some(itx);
             // Installs are interactive too: a helper told not to ask refuses a
             // conflict outright instead of letting the user decide.
-            removal::spawn_install(request, true, irx, tx);
+            removal::spawn_install(request, true, irx, d.pids.clone(), tx);
             d.receiver = Some(rx);
             d.stage = Stage::Running;
             d.output.clear();
@@ -1007,7 +1009,7 @@ impl Ui {
         // snapshot, nothing to reconcile.
         if let Some(plan) = d.job.as_restore().cloned() {
             let (tx, rx) = std::sync::mpsc::channel();
-            removal::spawn_restore(plan, tx);
+            removal::spawn_restore(plan, d.pids.clone(), tx);
             d.receiver = Some(rx);
             d.stage = Stage::Running;
             d.output.clear();
@@ -1035,7 +1037,7 @@ impl Ui {
             .collect();
 
         let (tx, rx) = std::sync::mpsc::channel();
-        removal::spawn(names, versions, d.mode(), d.snapshot, tx);
+        removal::spawn(names, versions, d.mode(), d.snapshot, d.pids.clone(), tx);
         d.receiver = Some(rx);
         d.stage = Stage::Running;
         d.output.clear();
@@ -1524,6 +1526,18 @@ impl Ui {
             // Without this a question like "Replace X with Y? [Y/n]" stops the
             // upgrade dead, since nothing can reach pacman's stdin.
             Stage::Running => match key.code {
+                // Ctrl+C interrupts the command rather than quitting the
+                // program: quitting would orphan a live pacman transaction
+                // holding the database lock, which is a far worse place to
+                // leave someone than a cancelled operation.
+                KeyCode::Char('c') if ctrl => {
+                    if crate::ops::exec::interrupt(&d.pids) {
+                        d.interrupted = true;
+                        d.output.push("— interrupt sent, waiting for it to stop —".into());
+                    } else {
+                        d.output.push("— nothing running to interrupt —".into());
+                    }
+                }
                 KeyCode::Char(c) if !ctrl && d.input.is_some() => d.answer.push(c),
                 KeyCode::Backspace if d.input.is_some() => {
                     d.answer.pop();

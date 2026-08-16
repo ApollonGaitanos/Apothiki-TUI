@@ -202,7 +202,11 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
             // Driven by the clock, not by output: the whole point is to keep
             // moving while nothing is being printed.
             let frame = FRAMES[(millis / 125) as usize % FRAMES.len()];
-            format!(" {frame} {verb}…  {}m{:02}s ", secs / 60, secs % 60)
+            if d.interrupted {
+                format!(" {frame} stopping…  {}m{:02}s ", secs / 60, secs % 60)
+            } else {
+                format!(" {frame} {verb}…  {}m{:02}s ", secs / 60, secs % 60)
+            }
         }
         Stage::Done { success: true } => " done ".to_string(),
         Stage::Done { success: false } => " failed ".to_string(),
@@ -417,6 +421,10 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
                     "Working. AUR packages are compiled here, which can take a while.",
                     Style::default().fg(DIM()),
                 ));
+                lines.push(Line::styled(
+                    "Ctrl+C stops it.",
+                    Style::default().fg(DIM()),
+                ));
                 lines.push(Line::raw(""));
             }
             let budget = if d.input.is_some() { 18 } else { 20 };
@@ -440,6 +448,10 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
                 ]));
                 lines.push(Line::styled(
                     "type an answer and press Enter; empty Enter takes the default",
+                    Style::default().fg(DIM()),
+                ));
+                lines.push(Line::styled(
+                    "Ctrl+C stops the command",
                     Style::default().fg(DIM()),
                 ));
             }
@@ -1642,7 +1654,10 @@ fn impact_lines(ui: &mut Ui) -> Vec<Line<'static>> {
 }
 
 fn draw_keybar(f: &mut Frame, area: Rect, ui: &Ui) {
-    let hints: Vec<(&str, &str)> = if ui.dialog.is_some() {
+    let running = ui.dialog.as_ref().is_some_and(|d| matches!(d.stage, Stage::Running));
+    let hints: Vec<(&str, &str)> = if running {
+        vec![("Enter", "answer"), ("Ctrl+C", "stop the command")]
+    } else if ui.dialog.is_some() {
         vec![("↑↓", "mode"), ("Enter", "confirm"), ("Ctrl+S", "snapshot"), ("Esc", "cancel")]
     } else if ui.searching && ui.view == View::Search {
         vec![

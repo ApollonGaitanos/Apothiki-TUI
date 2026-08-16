@@ -190,6 +190,29 @@ pub fn run_privileged(program: &str, args: &[String], tx: &Sender<Output>) -> Ru
     run_inner(program, args, true, None, tx)
 }
 
+/// A non-interactive command whose pid is published, so Ctrl+C can stop it.
+///
+/// Every operation should be interruptible, not only the ones that ask
+/// questions: a removal cascading through two hundred packages is exactly as
+/// trapping as a build.
+pub fn run_privileged_tracked(
+    program: &str,
+    args: &[String],
+    pids: &PidSlot,
+    tx: &Sender<Output>,
+) -> RunResult {
+    run_tracked(program, args, true, None, Some(pids), tx)
+}
+
+pub fn run_unprivileged_tracked(
+    program: &str,
+    args: &[String],
+    pids: &PidSlot,
+    tx: &Sender<Output>,
+) -> RunResult {
+    run_tracked(program, args, false, None, Some(pids), tx)
+}
+
 /// The stdin of whichever command is currently running.
 ///
 /// An operation can be several commands in sequence — a repository upgrade,
@@ -204,6 +227,35 @@ pub type StdinSlot = std::sync::Arc<std::sync::Mutex<Option<std::process::ChildS
 
 pub fn stdin_slot() -> StdinSlot {
     Default::default()
+}
+
+/// The process id of whichever command is currently running, so it can be
+/// interrupted.
+///
+/// Without this a long operation is a trap: the dialog takes every key, the
+/// command may run for many minutes, and the only way out is killing the whole
+/// program — which orphans a live pacman transaction holding the database lock.
+pub type PidSlot = std::sync::Arc<std::sync::Mutex<Option<u32>>>;
+
+pub fn pid_slot() -> PidSlot {
+    Default::default()
+}
+
+/// Sends SIGINT to the running command, as pressing Ctrl+C in a shell would.
+///
+/// SIGINT rather than SIGKILL deliberately: pacman handles it, finishing
+/// whatever file operation is in flight and unwinding cleanly. Killing it
+/// outright is how a half-written package and a stale lock happen.
+pub fn interrupt(pid: &PidSlot) -> bool {
+    let Ok(guard) = pid.lock() else { return false };
+    let Some(pid) = *guard else { return false };
+
+    unsafe extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+    const SIGINT: i32 = 2;
+    // SAFETY: kill on a pid we spawned; a dead pid simply returns an error.
+    unsafe { kill(pid as i32, SIGINT) == 0 }
 }
 
 /// Starts the one writer thread that serves every command in an operation.
@@ -236,18 +288,20 @@ pub fn run_privileged_interactive(
     program: &str,
     args: &[String],
     slot: &StdinSlot,
+    pids: &PidSlot,
     tx: &Sender<Output>,
 ) -> RunResult {
-    run_inner(program, args, true, Some(slot), tx)
+    run_tracked(program, args, true, Some(slot), Some(pids), tx)
 }
 
 pub fn run_unprivileged_interactive(
     program: &str,
     args: &[String],
     slot: &StdinSlot,
+    pids: &PidSlot,
     tx: &Sender<Output>,
 ) -> RunResult {
-    run_inner(program, args, false, Some(slot), tx)
+    run_tracked(program, args, false, Some(slot), Some(pids), tx)
 }
 
 /// Streams a child's output, optionally feeding it input.
@@ -256,6 +310,18 @@ fn run_inner(
     args: &[String],
     privileged: bool,
     slot: Option<&StdinSlot>,
+    tx: &Sender<Output>,
+) -> RunResult {
+    run_tracked(program, args, privileged, slot, None, tx)
+}
+
+/// As `run_inner`, also publishing the child's pid so it can be interrupted.
+fn run_tracked(
+    program: &str,
+    args: &[String],
+    privileged: bool,
+    slot: Option<&StdinSlot>,
+    pids: Option<&PidSlot>,
     tx: &Sender<Output>,
 ) -> RunResult {
     let (cmd, full): (&str, Vec<String>) = if privileged {
@@ -290,6 +356,12 @@ fn run_inner(
         }
     };
 
+    if let Some(pids) = pids {
+        if let Ok(mut guard) = pids.lock() {
+            *guard = Some(child.id());
+        }
+    }
+
     // Publish this command's stdin for the operation's writer thread.
     if let (Some(slot), Some(stdin)) = (slot, child.stdin.take()) {
         if let Ok(mut guard) = slot.lock() {
@@ -320,6 +392,11 @@ fn run_inner(
     // next command inheriting a stale handle.
     if let Some(slot) = slot {
         if let Ok(mut guard) = slot.lock() {
+            *guard = None;
+        }
+    }
+    if let Some(pids) = pids {
+        if let Ok(mut guard) = pids.lock() {
             *guard = None;
         }
     }
@@ -620,6 +697,48 @@ mod interactive_tests {
                 .any(|m| matches!(m, Output::Line(Stream::Stderr, l) if l.contains("status line"))),
             "and stderr must still be reported, tagged as stderr: {msgs:?}"
         );
+    }
+
+    /// Interrupting must actually stop a long-running command.
+    ///
+    /// The alternative is a dialog that takes every key while a build runs for
+    /// twenty minutes, whose only exit is killing the program — which orphans a
+    /// live pacman transaction still holding the database lock.
+    #[test]
+    fn a_running_command_can_be_interrupted() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let pids = pid_slot();
+        let watch = pids.clone();
+
+        std::thread::spawn(move || {
+            // Wait for the pid to be published, then interrupt.
+            for _ in 0..100 {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                if watch.lock().map(|g| g.is_some()).unwrap_or(false) {
+                    assert!(interrupt(&watch), "kill should succeed on a live child");
+                    return;
+                }
+            }
+            panic!("the pid was never published");
+        });
+
+        let started = std::time::Instant::now();
+        let result = run_tracked(
+            "sh",
+            &["-c".to_string(), "sleep 30".to_string()],
+            false,
+            None,
+            Some(&pids),
+            &tx,
+        );
+
+        assert!(!result.success, "an interrupted command must not report success");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "it should stop promptly, not run to completion"
+        );
+        // And the slot is cleared, so a later interrupt cannot hit a reused pid.
+        assert!(pids.lock().unwrap().is_none());
     }
 
     #[test]
