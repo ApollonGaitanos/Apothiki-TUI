@@ -3,7 +3,10 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap};
+use ratatui::widgets::{
+    Block, BorderType, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Scrollbar,
+    ScrollbarOrientation, ScrollbarState, Wrap,
+};
 use ratatui::Frame;
 
 use super::removal::Stage;
@@ -49,6 +52,91 @@ fn DANGER() -> Color {
 #[allow(non_snake_case)]
 fn OK() -> Color {
     theme().ok
+}
+
+/// `1 package`, `2 packages`. Small, but "1 packages" in a confirmation dialog
+/// undermines the care the rest of the dialog is trying to convey.
+fn plural(n: usize, singular: &str) -> String {
+    if n == 1 {
+        format!("{n} {singular}")
+    } else {
+        format!("{n} {singular}s")
+    }
+}
+
+/// A framed pane in the shared style.
+///
+/// Every border in the program comes from here. Rounded corners and one column
+/// of padding are not decoration for its own sake: text that touches a border
+/// is harder to scan, and a program that mixes border styles reads as several
+/// programs stitched together.
+fn pane(title: impl Into<String>, focused: bool) -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(if focused { ACCENT() } else { DIM() }))
+        .padding(Padding::horizontal(1))
+        .title(Line::styled(
+            format!(" {} ", title.into().trim()),
+            Style::default()
+                .fg(if focused { ACCENT() } else { DIM() })
+                .add_modifier(if focused {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
+        ))
+}
+
+/// A pane whose border carries a severity rather than a focus state.
+fn alert_pane(title: impl Into<String>, colour: Color) -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(colour))
+        .padding(Padding::horizontal(1))
+        .title(Line::styled(
+            format!(" {} ", title.into().trim()),
+            Style::default().fg(colour).add_modifier(Modifier::BOLD),
+        ))
+}
+
+/// The style for the selected row of a list.
+///
+/// A filled bar rather than a marker character: at a glance the eye finds a
+/// block of colour far faster than a single glyph, and the row stays readable
+/// because only the background changes.
+fn selection_style(focused: bool) -> Style {
+    if focused {
+        Style::default()
+            .bg(ACCENT())
+            .fg(Color::Black)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD)
+    }
+}
+
+/// Draws a scrollbar for a list, but only when there is more than fits.
+///
+/// A permanent scrollbar on a five-item list is chrome; an absent one on 1376
+/// dependencies leaves the user with no idea where they are.
+fn scrollbar(f: &mut Frame, area: Rect, total: usize, position: usize) {
+    let visible = area.height.saturating_sub(2) as usize;
+    if total <= visible {
+        return;
+    }
+    let mut state = ScrollbarState::new(total.saturating_sub(visible)).position(position);
+    f.render_stateful_widget(
+        Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(Some("│"))
+            .thumb_symbol("┃")
+            .style(Style::default().fg(DIM())),
+        area,
+        &mut state,
+    );
 }
 
 pub fn draw(f: &mut Frame, ui: &mut Ui) {
@@ -191,6 +279,18 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
 
     let mut lines: Vec<Line> = Vec::new();
     let (noun, verb) = d.verb();
+    // The border states the severity before a word is read.
+    let severity = match &d.stage {
+        Stage::Done { success: true } => OK(),
+        Stage::Done { success: false } => DANGER(),
+        Stage::Running => ACCENT(),
+        _ => match d.job.as_removal().map(|r| r.risk) {
+            Some(Risk::Safe) => OK(),
+            Some(Risk::Caution) => WARN(),
+            Some(_) => DANGER(),
+            None => ACCENT(),
+        },
+    };
     let title = match &d.stage {
         Stage::Running => {
             // A spinner and a clock, because "is it stuck?" is the only
@@ -312,7 +412,8 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
             lines.push(Line::raw(""));
             let total = req.plan.all_removed().len();
             lines.push(Line::raw(format!(
-                "{total} packages, {} freed",
+                "{}, {} freed",
+                plural(total, "package"),
                 human_size(req.plan.freed_bytes)
             )));
             if !req.apps_lost.is_empty() {
@@ -341,14 +442,22 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
                 _ => DANGER(),
             };
             lines.push(Line::raw(""));
-            lines.push(Line::styled(
-                format!(
-                    "[{}] {}",
-                    req.risk.symbol(),
-                    super::removal::risk_sentence(req.risk, &req.apps_lost)
+            lines.push(Line::from(vec![
+                // A filled badge rather than bracketed text: the tier is the
+                // one thing that should be readable from across the room.
+                Span::styled(
+                    format!(" {} ", req.risk.symbol().to_uppercase()),
+                    Style::default()
+                        .bg(risk_colour)
+                        .fg(Color::Black)
+                        .add_modifier(Modifier::BOLD),
                 ),
-                Style::default().fg(risk_colour),
-            ));
+                Span::raw(" "),
+                Span::styled(
+                    super::removal::risk_sentence(req.risk, &req.apps_lost),
+                    Style::default().fg(risk_colour),
+                ),
+            ]));
 
             lines.push(Line::raw(""));
             lines.push(Line::styled(
@@ -558,7 +667,7 @@ fn draw_flatpak_confirm(f: &mut Frame, popup: Rect, r: &crate::ops::bundle::Flat
         "Enter remove   Esc cancel".to_string(),
         Style::default().fg(DIM()),
     ));
-    render_popup(f, popup, " remove flatpak ", lines);
+    render_popup_styled(f, popup, "remove flatpak", lines, WARN());
 }
 
 /// Removing an AppImage, component by component.
@@ -616,7 +725,7 @@ fn draw_appimage_confirm(f: &mut Frame, popup: Rect, r: &crate::ops::bundle::App
 
     lines.push(Line::raw(""));
     lines.push(Line::styled(
-        format!("{} item(s) will be deleted.", r.targets().len()),
+        format!("{} will be deleted.", plural(r.targets().len(), "item")),
         Style::default().fg(WARN()),
     ));
     lines.push(Line::styled(
@@ -628,7 +737,7 @@ fn draw_appimage_confirm(f: &mut Frame, popup: Rect, r: &crate::ops::bundle::App
         "1/2/3 toggle   Enter remove   Esc cancel".to_string(),
         Style::default().fg(DIM()),
     ));
-    render_popup(f, popup, " remove appimage ", lines);
+    render_popup_styled(f, popup, "remove appimage", lines, DANGER());
 }
 
 /// Upgrading one package.
@@ -711,7 +820,7 @@ fn draw_single_update_confirm(
         "Enter upgrade anyway   Esc cancel".to_string(),
         Style::default().fg(DIM()),
     ));
-    render_popup(f, popup, " upgrade one package ", lines);
+    render_popup_styled(f, popup, "upgrade one package", lines, WARN());
 }
 
 /// The update dialog.
@@ -727,7 +836,7 @@ fn draw_update_confirm(
     interactive: bool,
 ) {
     let mut lines: Vec<Line> = vec![Line::styled(
-        format!("{} update(s) available", plan.total()),
+        format!("{} available", plural(plan.total(), "update")),
         Style::default().add_modifier(Modifier::BOLD).fg(ACCENT()),
     )];
     lines.push(Line::raw(""));
@@ -827,7 +936,7 @@ fn draw_update_confirm(
         "Enter upgrade   a toggle answers   Ctrl+S snapshot   Esc cancel".to_string(),
         Style::default().fg(DIM()),
     ));
-    render_popup(f, popup, " update ", lines);
+    render_popup_styled(f, popup, "update", lines, OK());
 }
 
 /// The install dialog.
@@ -888,7 +997,7 @@ fn draw_install_confirm(f: &mut Frame, popup: Rect, request: &crate::ops::Instal
         .to_string(),
         Style::default().fg(if blocked { DANGER() } else { DIM() }),
     ));
-    render_popup(f, popup, " install ", lines);
+    render_popup_styled(f, popup, "install", lines, if blocked { DANGER() } else { OK() });
 }
 
 /// The undo dialog.
@@ -909,8 +1018,12 @@ fn draw_restore_confirm(f: &mut Frame, popup: Rect, plan: &crate::ops::restore::
     if !plan.missing.is_empty() {
         lines.push(Line::styled(
             format!(
-                "{} package(s) are no longer in the package cache:",
-                plan.missing.len()
+                "{} no longer in the package cache:",
+                if plan.missing.len() == 1 {
+                    "1 package is".to_string()
+                } else {
+                    format!("{} packages are", plan.missing.len())
+                }
             ),
             Style::default().fg(DANGER()),
         ));
@@ -936,8 +1049,8 @@ fn draw_restore_confirm(f: &mut Frame, popup: Rect, plan: &crate::ops::restore::
     }
 
     lines.push(Line::raw(format!(
-        "Reinstall {} package(s) from the local cache:",
-        plan.available.len()
+        "Reinstall {} from the local cache:",
+        plural(plan.available.len(), "package")
     )));
     for (n, v, _) in plan.available.iter().take(10) {
         lines.push(Line::raw(format!("  {n} {v}")));
@@ -971,77 +1084,106 @@ fn draw_restore_confirm(f: &mut Frame, popup: Rect, plan: &crate::ops::restore::
         "Enter restore   Esc cancel",
         Style::default().fg(DIM()),
     ));
-    render_popup(f, popup, " undo ", lines);
+    render_popup_styled(f, popup, "undo", lines, OK());
 }
 
 fn render_popup(f: &mut Frame, popup: Rect, title: &str, lines: Vec<Line>) {
+    render_popup_styled(f, popup, title, lines, DANGER())
+}
+
+/// A dialog whose border colour states its severity before a word is read.
+fn render_popup_styled(f: &mut Frame, popup: Rect, title: &str, lines: Vec<Line>, colour: Color) {
     f.render_widget(Clear, popup);
     f.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: false }).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(DANGER()))
-                .title(title.to_string()),
-        ),
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(alert_pane(title, colour)),
         popup,
     );
 }
 
 fn draw_tabs(f: &mut Frame, area: Rect, ui: &Ui) {
-    let titles: Vec<Line> = View::ALL
-        .iter()
-        .map(|v| {
-            let count = match v {
-                View::Apps => ui.state.catalog.apps.len(),
-                View::Tools => ui.state.catalog.tools.len(),
-                View::Dependencies => ui
-                    .state
-                    .db
-                    .packages
-                    .iter()
-                    .filter(|p| p.reason == Reason::Dependency)
-                    .count(),
-                View::Orphans => ui.state.graph.orphans(ui.orphan_mode).len(),
-                View::Search => ui.results.len(),
-                View::Updates => ui.updates.total(),
-            };
-            Line::from(format!(" {} ({count}) ", v.title()))
-        })
-        .collect();
+    // Built by hand rather than with the `Tabs` widget so the active view can
+    // carry a filled background. A bold-vs-normal distinction is too weak to
+    // find at a glance on a line this busy.
+    let mut spans: Vec<Span> = Vec::new();
 
-    let selected = View::ALL.iter().position(|v| *v == ui.view).unwrap_or(0);
+    for (i, v) in View::ALL.into_iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(" · ", Style::default().fg(DIM())));
+        }
+        let count = match v {
+            View::Apps => ui.state.catalog.apps.len(),
+            View::Tools => ui.state.catalog.tools.len(),
+            View::Dependencies => ui
+                .state
+                .db
+                .packages
+                .iter()
+                .filter(|p| p.reason == Reason::Dependency)
+                .count(),
+            View::Orphans => ui.state.graph.orphans(ui.orphan_mode).len(),
+            View::Search => ui.results.len(),
+            View::Updates => ui.updates.total(),
+        };
+
+        let active = v == ui.view;
+        let (key, name) = v.title().split_once(' ').unwrap_or(("", v.title()));
+
+        if active {
+            spans.push(Span::styled(
+                format!(" {key} {name} {count} "),
+                Style::default()
+                    .bg(ACCENT())
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        } else {
+            spans.push(Span::styled(
+                format!("{key} "),
+                Style::default().fg(ACCENT()),
+            ));
+            spans.push(Span::styled(name.to_string(), Style::default().fg(DIM())));
+            spans.push(Span::styled(
+                format!(" {count}"),
+                Style::default().fg(DIM()).add_modifier(Modifier::DIM),
+            ));
+        }
+    }
+
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
+
+    // Right-aligned status: updates first, since it is the one that asks for
+    // action, then whether a refresh is in flight.
+    let mut right: Vec<Span> = Vec::new();
     if !ui.updates.is_empty() {
-        let label = format!(" {} updates (u) ", ui.updates.total());
-        let w = label.chars().count() as u16;
+        right.push(Span::styled(
+            format!(" {} updates ", ui.updates.total()),
+            Style::default()
+                .bg(OK())
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        ));
+        right.push(Span::styled(
+            format!("{} ", ui.keymap_hint_update()),
+            Style::default().fg(OK()),
+        ));
+    }
+    if ui.is_reloading() {
+        right.push(Span::styled(" refreshing… ", Style::default().fg(ACCENT())));
+    }
+    if !right.is_empty() {
+        let width: usize = right.iter().map(|s| s.content.chars().count()).sum();
+        let x = area.width.saturating_sub(width as u16 + 1);
         f.render_widget(
-            Paragraph::new(Line::styled(
-                label,
-                Style::default().fg(Color::Black).bg(OK()),
-            )),
+            Paragraph::new(Line::from(right)),
             Rect {
-                x: area.x + area.width.saturating_sub(w + 14),
-                width: w.min(area.width),
+                x: area.x + x,
+                width: area.width.saturating_sub(x),
                 ..area
             },
         );
     }
-    if ui.is_reloading() {
-        // A refresh rescans the whole system; saying so beats a list that
-        // appears frozen.
-        let w = area.width.saturating_sub(14);
-        f.render_widget(
-            Paragraph::new(Line::styled(" refreshing… ", Style::default().fg(OK()))),
-            Rect { x: area.x + w, width: 13.min(area.width), ..area },
-        );
-    }
-    f.render_widget(
-        Tabs::new(titles)
-            .select(selected)
-            .style(Style::default().fg(DIM()))
-            .highlight_style(Style::default().fg(ACCENT()).add_modifier(Modifier::BOLD))
-            .divider(""),
-        area,
-    );
 }
 
 /// A concurrent pacman transaction must be visible, not discovered through a
@@ -1056,6 +1198,14 @@ fn draw_lock_banner(f: &mut Frame, area: Rect) {
 
 fn draw_list(f: &mut Frame, area: Rect, ui: &mut Ui) {
     let focused = ui.focus == Focus::List;
+    let noun = match ui.view {
+        View::Apps => "application",
+        View::Tools => "tool",
+        View::Dependencies => "dependency",
+        View::Orphans => "orphan",
+        View::Updates => "update",
+        View::Search => "result",
+    };
     let title = if ui.view == View::Search {
         let state = match ui.aur_state {
             crate::data::aur::AurState::Downloading => "  (AUR index downloading…)",
@@ -1072,9 +1222,9 @@ fn draw_list(f: &mut Frame, area: Rect, ui: &mut Ui) {
             ui.results.len()
         )
     } else if ui.searching || !ui.query.is_empty() {
-        format!(" filter: {}▏ ({} matches) ", ui.query, ui.rows().len())
+        format!("filter: {}▏ — {} matching", ui.query, ui.rows().len())
     } else {
-        format!(" {} ", ui.rows().len())
+        plural(ui.rows().len(), noun)
     };
 
     let items: Vec<ListItem> = ui
@@ -1086,23 +1236,37 @@ fn draw_list(f: &mut Frame, area: Rect, ui: &mut Ui) {
     let mut state = ListState::default();
     state.select(Some(ui.selection()));
 
+    let total = ui.rows().len();
     f.render_stateful_widget(
         List::new(items)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(if focused { ACCENT() } else { DIM() }))
-                    .title(title),
-            )
-            .highlight_style(
-                Style::default()
-                    .add_modifier(Modifier::BOLD)
-                    .bg(if focused { Color::DarkGray } else { Color::Reset }),
-            )
-            .highlight_symbol("▌"),
+            .block(pane(title, focused))
+            .highlight_style(selection_style(focused))
+            .highlight_symbol(""),
         area,
         &mut state,
     );
+    scrollbar(f, area, total, ui.selection());
+
+    if total == 0 {
+        // An empty pane with no explanation reads as a failure to load.
+        let msg = match ui.view {
+            View::Search if ui.query.is_empty() => "type to search repositories and the AUR",
+            View::Search => "nothing matches",
+            View::Updates => "everything is up to date",
+            View::Orphans => "no orphans — nothing is installed that nothing needs",
+            _ if !ui.query.is_empty() => "nothing matches that filter",
+            _ => "nothing here",
+        };
+        f.render_widget(
+            Paragraph::new(Line::styled(msg, Style::default().fg(DIM())))
+                .alignment(ratatui::layout::Alignment::Center),
+            Rect {
+                y: area.y + area.height / 2,
+                height: 1,
+                ..area
+            },
+        );
+    }
 }
 
 fn row_line<'a>(ui: &'a Ui, item: Item) -> Line<'a> {
@@ -1245,10 +1409,7 @@ fn draw_detail(f: &mut Frame, area: Rect, ui: &mut Ui) {
 
     // Icon beside the text when the app has one. The block is drawn first so
     // both halves sit inside one border.
-    let details_block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(DIM()))
-        .title(" details ");
+    let details_block = pane("details", false);
     let inner = details_block.inner(chunks[0]);
     f.render_widget(details_block, chunks[0]);
 
@@ -1287,12 +1448,7 @@ fn draw_detail(f: &mut Frame, area: Rect, ui: &mut Ui) {
     f.render_widget(
         Paragraph::new(plan_lines)
             .wrap(Wrap { trim: false })
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(DIM()))
-                    .title(" impact preview (nothing is removed) "),
-            ),
+            .block(pane("if removed", false)),
         chunks[1],
     );
 
@@ -1334,29 +1490,21 @@ fn draw_detail(f: &mut Frame, area: Rect, ui: &mut Ui) {
         })
         .collect();
 
-    let title = format!(
-        " relationships ({}) — → to open, ← to go back ",
-        rows.len().saturating_sub(1)
-    );
+    // Navigation hints belong in the hint bar, not stuffed into a border.
+    let title = format!("relationships {}", rows.len().saturating_sub(1));
 
     let mut state = ListState::default();
     state.select(Some(ui.related_selected.min(rows.len().saturating_sub(1))));
 
     f.render_stateful_widget(
         List::new(items)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(if related_focused { ACCENT() } else { DIM() }))
-                    .title(title),
-            )
-            .highlight_style(Style::default().add_modifier(Modifier::BOLD).bg(
-                if related_focused { Color::DarkGray } else { Color::Reset },
-            ))
-            .highlight_symbol("▌"),
+            .block(pane(title, related_focused))
+            .highlight_style(selection_style(related_focused))
+            .highlight_symbol(""),
         chunks[2],
         &mut state,
     );
+    scrollbar(f, chunks[2], rows.len(), ui.related_selected);
 }
 
 fn detail_header(ui: &Ui, item: Item, lines: &mut Vec<Line>) {
@@ -1619,7 +1767,8 @@ fn impact_lines(ui: &mut Ui) -> Vec<Line<'static>> {
     };
     lines.push(Line::styled(
         format!(
-            "{total} packages ({} target, {} cascade), {} freed",
+            "{} ({} target, {} cascade), {} freed",
+            plural(total, "package"),
             plan.target.len(),
             plan.cascade.len(),
             human_size(plan.freed_bytes)

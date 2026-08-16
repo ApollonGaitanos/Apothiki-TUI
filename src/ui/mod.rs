@@ -633,6 +633,14 @@ impl Ui {
         self.icon.as_mut().map(|(_, p)| p)
     }
 
+    /// The key currently bound to opening updates, for the badge.
+    pub fn keymap_hint_update(&self) -> String {
+        self.keymap
+            .action_for(crossterm::event::KeyCode::Char('u'), KeyModifiers::NONE)
+            .map(|_| "(u)".to_string())
+            .unwrap_or_default()
+    }
+
     /// Rows of the relationships pane: the removal action, then relationships.
     pub fn related_rows(&self) -> Vec<RelatedRow> {
         let mut rows = vec![RelatedRow::RemoveAction];
