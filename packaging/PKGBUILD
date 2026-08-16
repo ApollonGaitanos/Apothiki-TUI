@@ -5,10 +5,10 @@ pkgrel=1
 pkgdesc="Application-centric package explorer for Arch Linux"
 arch=('x86_64')
 # GitHub names the tarball's top directory after the *repository*, not the
-# package, and the two differ in case here. Getting this wrong fails the build
-# on the first `cd`, and only ever off this machine.
-_repo=Apothiki
-url="https://github.com/ApollonG/$_repo"
+# package: Apothiki-TUI-0.1.0, not apothiki-0.1.0. Getting this wrong fails the
+# build on the first `cd`, and only ever off this machine.
+_repo=Apothiki-TUI
+url="https://github.com/ApollonGaitanos/$_repo"
 license=('MIT')
 # pacman is a runtime dependency in the literal sense: every mutation shells out
 # to it, and the read-only oracles the tool checks itself against are its output.

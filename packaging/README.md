@@ -14,13 +14,13 @@ may already have built against — so the checksum step is not optional.
 
 ```sh
 git branch -M main                 # GitHub's default; skip if you prefer master
-git remote add origin git@github.com:ApollonG/Apothiki.git
+git remote add origin git@github.com:ApollonGaitanos/Apothiki-TUI.git
 git push -u origin main
 ```
 
 Create the repository on GitHub first (empty, no README/licence — the tree
 already has both). If you use HTTPS rather than SSH, the remote is
-`https://github.com/ApollonG/Apothiki.git`.
+`https://github.com/ApollonGaitanos/Apothiki-TUI.git`.
 
 ## 2. Tag the release
 
@@ -46,8 +46,7 @@ makepkg -f                         # builds it for real, runs the test suite
 ```
 
 `makepkg` also proves the tarball's top directory matches — GitHub names it
-after the *repository* (`Apothiki-0.1.0`), not the package, and the two differ
-in case here.
+after the *repository* (`Apothiki-TUI-0.1.0`), not the package (`apothiki`).
 
 ## 4. Publish to the AUR
 
