@@ -126,7 +126,9 @@ cargo build --release
 install -Dm755 target/release/apo ~/.local/bin/apo
 ```
 
-Publishing a release is documented in [packaging/README.md](packaging/README.md).
+Every route above compiles from source, which takes a few minutes. A prebuilt
+`apothiki-bin` package is planned; see [packaging/README.md](packaging/README.md),
+which also covers publishing a release.
 
 ## Licence
 
