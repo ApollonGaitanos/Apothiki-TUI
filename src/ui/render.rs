@@ -363,7 +363,7 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
                     Style::default().fg(DIM()),
                 ));
                 lines.push(Line::styled("Esc to close", Style::default().fg(DIM())));
-                render_popup(f, popup, &title, lines);
+                render_popup_styled(f, popup, &title, lines, severity);
                 return;
             }
 
@@ -385,7 +385,7 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
                     Style::default().fg(DIM()),
                 ));
                 lines.push(Line::styled("Esc to close", Style::default().fg(DIM())));
-                render_popup(f, popup, &title, lines);
+                render_popup_styled(f, popup, &title, lines, severity);
                 return;
             }
 
@@ -592,7 +592,7 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
         }
     }
 
-    render_popup(f, popup, &title, lines);
+    render_popup_styled(f, popup, &title, lines, severity);
 }
 
 /// The PKGBUILD review pane.
@@ -1044,7 +1044,7 @@ fn draw_restore_confirm(f: &mut Frame, popup: Rect, plan: &crate::ops::restore::
             Style::default().fg(DIM()),
         ));
         lines.push(Line::styled("Esc to close", Style::default().fg(DIM())));
-        render_popup(f, popup, " undo ", lines);
+        render_popup_styled(f, popup, "undo", lines, WARN());
         return;
     }
 
@@ -1085,10 +1085,6 @@ fn draw_restore_confirm(f: &mut Frame, popup: Rect, plan: &crate::ops::restore::
         Style::default().fg(DIM()),
     ));
     render_popup_styled(f, popup, "undo", lines, OK());
-}
-
-fn render_popup(f: &mut Frame, popup: Rect, title: &str, lines: Vec<Line>) {
-    render_popup_styled(f, popup, title, lines, DANGER())
 }
 
 /// A dialog whose border colour states its severity before a word is read.
