@@ -426,9 +426,9 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
 
             // The incomplete line is where a prompt lives, so it is shown as it
             // arrives rather than waiting for a newline that never comes.
-            if !d.partial.is_empty() {
+            if !d.partial().is_empty() {
                 lines.push(Line::styled(
-                    d.partial.clone(),
+                    d.partial().to_string(),
                     Style::default().fg(WARN()).add_modifier(Modifier::BOLD),
                 ));
             }

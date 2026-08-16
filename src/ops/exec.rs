@@ -131,19 +131,39 @@ pub fn authenticate(secret: &Secret) -> Result<(), String> {
     Err(detail.to_string())
 }
 
+/// Which of a command's streams a message came from.
+///
+/// Tracked because prompts and progress live on different streams and must not
+/// erase each other: pacman writes `:: Proceed? [Y/n] ` to stdout as an
+/// unterminated fragment while writing status lines to stderr, and a single
+/// shared "current fragment" means the next stderr line deletes the question
+/// the user is being asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stream {
+    Stdout,
+    Stderr,
+}
+
 /// A line of output from a running operation.
 #[derive(Debug, Clone)]
 pub enum Output {
-    Line(String),
+    Line(Stream, String),
     /// The current incomplete line.
     ///
     /// **Prompts arrive this way.** `:: Proceed with installation? [Y/n] ` has
     /// no trailing newline, so a reader that only emits complete lines never
     /// shows it: the user sees nothing, the program waits for an answer to a
     /// question it never displayed, and the operation appears to hang.
-    Partial(String),
+    Partial(Stream, String),
     Finished { success: bool, code: Option<i32> },
     Failed(String),
+}
+
+impl Output {
+    /// A message from us rather than from the command.
+    pub fn info(text: impl Into<String>) -> Output {
+        Output::Line(Stream::Stdout, text.into())
+    }
 }
 
 /// The result of a privileged command.
@@ -284,11 +304,11 @@ fn run_inner(
     // the other — and pacman writes its progress to stderr.
     let err_handle = child.stderr.take().map(|err| {
         let tx = tx.clone();
-        std::thread::spawn(move || pump(err, &tx))
+        std::thread::spawn(move || pump(err, Stream::Stderr, &tx))
     });
 
     if let Some(out) = child.stdout.take() {
-        lines.extend(pump(out, tx));
+        lines.extend(pump(out, Stream::Stdout, tx));
     }
     if let Some(h) = err_handle {
         if let Ok(collected) = h.join() {
@@ -325,7 +345,7 @@ fn run_inner(
 ///
 /// Byte-wise rather than by line because a prompt is a fragment: it ends in a
 /// space, not a newline, and waiting for one means never showing the question.
-fn pump(stream: impl std::io::Read, tx: &Sender<Output>) -> Vec<String> {
+fn pump(stream: impl std::io::Read, which: Stream, tx: &Sender<Output>) -> Vec<String> {
     use std::io::Read;
 
     let mut reader = std::io::BufReader::new(stream);
@@ -343,19 +363,19 @@ fn pump(stream: impl std::io::Read, tx: &Sender<Output>) -> Vec<String> {
         while let Some(i) = pending.find('\n') {
             let line: String = pending.drain(..=i).collect();
             let line = line.trim_end_matches(['\n', '\r']).to_string();
-            let _ = tx.send(Output::Line(line.clone()));
+            let _ = tx.send(Output::Line(which, line.clone()));
             lines.push(line);
         }
         if !pending.is_empty() {
             // Carriage returns are progress-bar redraws; only the last matters.
             let shown = pending.rsplit('\r').next().unwrap_or(&pending).to_string();
-            let _ = tx.send(Output::Partial(shown));
+            let _ = tx.send(Output::Partial(which, shown));
         }
     }
 
     if !pending.is_empty() {
         let line = pending.trim_end().to_string();
-        let _ = tx.send(Output::Line(line.clone()));
+        let _ = tx.send(Output::Line(which, line.clone()));
         lines.push(line);
     }
     lines
@@ -515,7 +535,7 @@ mod interactive_tests {
         let msgs: Vec<Output> = rx.try_iter().collect();
         assert!(
             msgs.iter()
-                .any(|m| matches!(m, Output::Partial(p) if p.contains("Proceed?"))),
+                .any(|m| matches!(m, Output::Partial(_, p) if p.contains("Proceed?"))),
             "the prompt must arrive before any newline does: {msgs:?}"
         );
         assert!(
@@ -557,6 +577,51 @@ mod interactive_tests {
         );
     }
 
+    /// A prompt on stdout must survive traffic on stderr.
+    ///
+    /// This is the bug that stalled a real upgrade: pacman asked
+    /// ":: Proceed with installation? [Y/n]" on stdout and wrote status to
+    /// stderr, one shared fragment slot meant the question was erased, and the
+    /// dialog sat for minutes waiting on something the user could not see.
+    #[test]
+    fn a_stdout_prompt_is_not_erased_by_stderr_output() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let slot = stdin_slot();
+        let (itx, irx) = std::sync::mpsc::channel();
+        spawn_answer_writer(irx, slot.clone());
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let _ = itx.send("y".to_string());
+        });
+
+        // Prompt on stdout, then chatter on stderr, then wait for an answer —
+        // exactly pacman's shape.
+        let result = run_inner(
+            "sh",
+            &[
+                "-c".to_string(),
+                "printf ':: Proceed? [Y/n] '; echo 'status line' >&2; read a; echo \"got:$a\""
+                    .to_string(),
+            ],
+            false,
+            Some(&slot),
+            &tx,
+        );
+        assert!(result.success);
+
+        let msgs: Vec<Output> = rx.try_iter().collect();
+        let prompt = msgs.iter().rev().find_map(|m| match m {
+            Output::Partial(Stream::Stdout, p) if p.contains("Proceed?") => Some(p.clone()),
+            _ => None,
+        });
+        assert!(prompt.is_some(), "the stdout prompt must be reported: {msgs:?}");
+        assert!(
+            msgs.iter()
+                .any(|m| matches!(m, Output::Line(Stream::Stderr, l) if l.contains("status line"))),
+            "and stderr must still be reported, tagged as stderr: {msgs:?}"
+        );
+    }
+
     #[test]
     fn complete_lines_still_arrive_as_lines() {
         let (tx, rx) = std::sync::mpsc::channel();
@@ -571,7 +636,7 @@ mod interactive_tests {
         let lines: Vec<String> = rx
             .try_iter()
             .filter_map(|m| match m {
-                Output::Line(l) => Some(l),
+                Output::Line(_, l) => Some(l),
                 _ => None,
             })
             .collect();

@@ -153,8 +153,15 @@ pub struct RemovalDialog {
     pub confirm_word: String,
     /// When the running operation started, for the elapsed-time indicator.
     pub started: Option<std::time::Instant>,
-    /// The incomplete last line of output — where prompts appear.
-    pub partial: String,
+    /// The incomplete last line of each stream — where prompts appear.
+    ///
+    /// Kept per stream. pacman writes its question to stdout without a newline
+    /// while status goes to stderr, so a single shared slot means the next
+    /// stderr line erases the question the user is being asked, and the dialog
+    /// sits there apparently frozen while pacman waits for an answer to
+    /// something invisible.
+    pub partial_out: String,
+    pub partial_err: String,
     /// What the user is typing in answer to a prompt.
     pub answer: String,
     /// Sends answers to the running command's stdin, when it is interactive.
@@ -190,7 +197,8 @@ impl RemovalDialog {
             pkgbuild_scroll: 0,
             pkgbuild_rx: None,
             started: None,
-            partial: String::new(),
+            partial_out: String::new(),
+            partial_err: String::new(),
             answer: String::new(),
             input: None,
             interactive: false,
@@ -215,7 +223,8 @@ impl RemovalDialog {
             pkgbuild_scroll: 0,
             pkgbuild_rx: None,
             started: None,
-            partial: String::new(),
+            partial_out: String::new(),
+            partial_err: String::new(),
             answer: String::new(),
             input: None,
             interactive: false,
@@ -244,6 +253,15 @@ impl RemovalDialog {
             Job::Update(_) | Job::SingleUpdate(_) => ("update", "upgrading"),
             Job::RemoveFlatpak(_) => ("remove flatpak", "removing"),
             Job::RemoveAppImage(_) => ("remove appimage", "deleting"),
+        }
+    }
+
+    /// The fragment worth showing: a prompt on stdout wins over stderr status.
+    pub fn partial(&self) -> &str {
+        if !self.partial_out.is_empty() {
+            &self.partial_out
+        } else {
+            &self.partial_err
         }
     }
 
@@ -294,7 +312,8 @@ impl RemovalDialog {
             pkgbuild_scroll: 0,
             pkgbuild_rx: None,
             started: None,
-            partial: String::new(),
+            partial_out: String::new(),
+            partial_err: String::new(),
             answer: String::new(),
             input: None,
             interactive: false,
@@ -329,7 +348,8 @@ impl RemovalDialog {
             pkgbuild_scroll: 0,
             pkgbuild_rx: None,
             started: None,
-            partial: String::new(),
+            partial_out: String::new(),
+            partial_err: String::new(),
             answer: String::new(),
             input: None,
             interactive: false,
@@ -353,7 +373,8 @@ impl RemovalDialog {
             pkgbuild_scroll: 0,
             pkgbuild_rx: None,
             started: None,
-            partial: String::new(),
+            partial_out: String::new(),
+            partial_err: String::new(),
             answer: String::new(),
             input: None,
             interactive: false,
@@ -377,7 +398,8 @@ impl RemovalDialog {
             pkgbuild_scroll: 0,
             pkgbuild_rx: None,
             started: None,
-            partial: String::new(),
+            partial_out: String::new(),
+            partial_err: String::new(),
             answer: String::new(),
             input: None,
             interactive: false,
@@ -525,8 +547,8 @@ pub fn spawn_flatpak_removal(
 ) {
     std::thread::spawn(move || {
         if dry_run_mode() {
-            let _ = tx.send(Output::Line("APOTHIKI_DRY_RUN is set — nothing will change".into()));
-            let _ = tx.send(Output::Line(format!("would run: {}", removal.command_line())));
+            let _ = tx.send(Output::info("APOTHIKI_DRY_RUN is set — nothing will change"));
+            let _ = tx.send(Output::info(format!("would run: {}", removal.command_line())));
             let _ = tx.send(Output::Finished { success: true, code: Some(0) });
             return;
         }
@@ -545,7 +567,7 @@ pub fn spawn_flatpak_removal(
         // Runtimes are Flatpak's dependencies; clearing unused ones is the
         // equivalent of -Rs and is where the space actually comes back.
         if success && removal.remove_unused {
-            let _ = tx.send(Output::Line("removing unused runtimes…".into()));
+            let _ = tx.send(Output::info("removing unused runtimes…"));
             success = run(&removal.unused_args(), &tx).success;
         }
 
@@ -581,9 +603,9 @@ pub fn spawn_appimage_removal(
         };
 
         if dry_run_mode() {
-            let _ = tx.send(Output::Line("APOTHIKI_DRY_RUN is set — nothing will change".into()));
+            let _ = tx.send(Output::info("APOTHIKI_DRY_RUN is set — nothing will change"));
             for t in removal.targets() {
-                let _ = tx.send(Output::Line(format!("would remove {}", t.display())));
+                let _ = tx.send(Output::info(format!("would remove {}", t.display())));
             }
             let _ = tx.send(Output::Finished { success: true, code: Some(0) });
             return;
@@ -591,7 +613,7 @@ pub fn spawn_appimage_removal(
 
         let (success, log) = crate::ops::bundle::delete_appimage(&removal, &home);
         for line in log {
-            let _ = tx.send(Output::Line(line));
+            let _ = tx.send(Output::info(line));
         }
         let _ = tx.send(Output::Finished { success, code: None });
 
@@ -627,8 +649,8 @@ pub fn spawn_single_update(
         let args = UpdatePlan::single_args(&update, !interactive);
 
         if dry_run_mode() {
-            let _ = tx.send(Output::Line("APOTHIKI_DRY_RUN is set — nothing will change".into()));
-            let _ = tx.send(Output::Line(format!("would run: {args:?}")));
+            let _ = tx.send(Output::info("APOTHIKI_DRY_RUN is set — nothing will change"));
+            let _ = tx.send(Output::info(format!("would run: {args:?}")));
             let _ = tx.send(Output::Finished { success: true, code: Some(0) });
             return;
         }
@@ -639,7 +661,7 @@ pub fn spawn_single_update(
                     &config,
                     &format!("apothiki: upgrade {}", update.name),
                 );
-                let _ = tx.send(Output::Line("taking snapshot…".into()));
+                let _ = tx.send(Output::info("taking snapshot…"));
                 if !exec::run_privileged("snapper", &sargs, &tx).success {
                     let _ = tx.send(Output::Failed(
                         "snapshot failed — upgrade aborted (uncheck the snapshot option to \
@@ -708,11 +730,11 @@ pub fn spawn_update(
 
     std::thread::spawn(move || {
         if dry_run_mode() {
-            let _ = tx.send(Output::Line("APOTHIKI_DRY_RUN is set — nothing will change".into()));
+            let _ = tx.send(Output::info("APOTHIKI_DRY_RUN is set — nothing will change"));
             if take_snapshot {
-                let _ = tx.send(Output::Line("would take a snapper snapshot".into()));
+                let _ = tx.send(Output::info("would take a snapper snapshot"));
             }
-            let _ = tx.send(Output::Line(format!(
+            let _ = tx.send(Output::info(format!(
                 "would run: sudo pacman {}",
                 UpdatePlan::system_upgrade_args(!interactive).join(" ")
             )));
@@ -720,7 +742,7 @@ pub fn spawn_update(
                 // Reported exactly as it will run: the AUR half is not
                 // interactive, and a dry-run that claims otherwise is worse
                 // than useless.
-                let _ = tx.send(Output::Line(format!(
+                let _ = tx.send(Output::info(format!(
                     "would then run: {} {}",
                     helper.clone().unwrap_or_else(|| "paru".into()),
                     UpdatePlan::aur_upgrade_args(!interactive).join(" ")
@@ -733,7 +755,7 @@ pub fn spawn_update(
         if take_snapshot {
             if let Some(config) = snapshot::config_name() {
                 let args = snapshot::pre_snapshot_args(&config, "apothiki: system upgrade");
-                let _ = tx.send(Output::Line("taking snapshot…".into()));
+                let _ = tx.send(Output::info("taking snapshot…"));
                 if !exec::run_privileged("snapper", &args, &tx).success {
                     let _ = tx.send(Output::Failed(
                         "snapshot failed — upgrade aborted (uncheck the snapshot option to \
@@ -785,8 +807,8 @@ pub fn spawn_update(
                 };
                 success = aur.success;
             } else {
-                let _ = tx.send(Output::Line(
-                    "no AUR helper found; AUR packages were not upgraded".into(),
+                let _ = tx.send(Output::info(
+                    "no AUR helper found; AUR packages were not upgraded",
                 ));
             }
         }
@@ -828,10 +850,10 @@ pub fn spawn_install(
 ) {
     std::thread::spawn(move || {
         if dry_run_mode() {
-            let _ = tx.send(Output::Line(
-                "APOTHIKI_DRY_RUN is set — nothing will be installed".into(),
+            let _ = tx.send(Output::info(
+                "APOTHIKI_DRY_RUN is set — nothing will be installed",
             ));
-            let _ = tx.send(Output::Line(format!(
+            let _ = tx.send(Output::info(format!(
                 "would run: {}",
                 request.command_line(!interactive)
             )));
@@ -889,10 +911,10 @@ pub fn spawn_install(
 pub fn spawn_restore(plan: crate::ops::restore::RestorePlan, tx: Sender<Output>) {
     std::thread::spawn(move || {
         if dry_run_mode() {
-            let _ = tx.send(Output::Line(
-                "APOTHIKI_DRY_RUN is set — nothing will be installed".into(),
+            let _ = tx.send(Output::info(
+                "APOTHIKI_DRY_RUN is set — nothing will be installed",
             ));
-            let _ = tx.send(Output::Line(format!("would run: {}", plan.command_line())));
+            let _ = tx.send(Output::info(format!("would run: {}", plan.command_line())));
             let _ = tx.send(Output::Finished { success: true, code: Some(0) });
             return;
         }
@@ -939,18 +961,18 @@ pub fn spawn(
         // Exists so the execution path can be tested honestly rather than by
         // reading it and hoping.
         if dry_run_mode() {
-            let _ = tx.send(Output::Line("APOTHIKI_DRY_RUN is set — nothing will be removed".into()));
+            let _ = tx.send(Output::info("APOTHIKI_DRY_RUN is set — nothing will be removed"));
             if take_snapshot {
-                let _ = tx.send(Output::Line("would take a snapper pre-transaction snapshot".into()));
+                let _ = tx.send(Output::info("would take a snapper pre-transaction snapshot"));
             }
-            let _ = tx.send(Output::Line(format!(
+            let _ = tx.send(Output::info(format!(
                 "would run: sudo pacman {}",
                 mode.args(&packages).join(" ")
             )));
             match exec::dry_run(&mode.dry_run_args(&packages)) {
                 Ok(lines) => {
                     for l in lines {
-                        let _ = tx.send(Output::Line(format!("  would remove {l}")));
+                        let _ = tx.send(Output::info(format!("  would remove {l}")));
                         // Paced so that live streaming is observable in this
                         // mode; the real path streams at pacman's own rate.
                         std::thread::sleep(std::time::Duration::from_millis(120));
@@ -970,7 +992,7 @@ pub fn spawn(
             if let Some(config) = snapshot::config_name() {
                 let desc = format!("apothiki: {} {}", mode.flags(), packages.join(" "));
                 let args = snapshot::pre_snapshot_args(&config, &desc);
-                let _ = tx.send(Output::Line("taking snapshot…".into()));
+                let _ = tx.send(Output::info("taking snapshot…"));
                 let result = exec::run_privileged("snapper", &args, &tx);
 
                 // `--print-number` writes the new snapshot's id on its own line.
@@ -1012,7 +1034,7 @@ pub fn spawn(
             snapshot: snapshot_id,
         };
         if let Err(e) = history::record(&entry) {
-            let _ = tx.send(Output::Line(format!("(could not write history: {e})")));
+            let _ = tx.send(Output::info(format!("(could not write history: {e})")));
         }
     });
 }

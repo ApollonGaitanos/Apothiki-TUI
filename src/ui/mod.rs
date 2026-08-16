@@ -1396,12 +1396,21 @@ impl Ui {
         let mut finished: Option<bool> = None;
         while let Ok(msg) = rx.try_recv() {
             match msg {
-                crate::ops::exec::Output::Line(l) => {
-                    d.partial.clear();
+                // A completed line only clears the fragment of its *own*
+                // stream: pacman's prompt sits on stdout while status flows on
+                // stderr, and clearing both would delete the question.
+                crate::ops::exec::Output::Line(stream, l) => {
+                    match stream {
+                        crate::ops::exec::Stream::Stdout => d.partial_out.clear(),
+                        crate::ops::exec::Stream::Stderr => d.partial_err.clear(),
+                    }
                     d.output.push(l);
                 }
                 // The live fragment: a prompt, or a progress bar mid-redraw.
-                crate::ops::exec::Output::Partial(p) => d.partial = p,
+                crate::ops::exec::Output::Partial(stream, p) => match stream {
+                    crate::ops::exec::Stream::Stdout => d.partial_out = p,
+                    crate::ops::exec::Stream::Stderr => d.partial_err = p,
+                },
                 crate::ops::exec::Output::Finished { success, .. } => finished = Some(success),
                 crate::ops::exec::Output::Failed(e) => {
                     d.error = Some(e);
@@ -1413,9 +1422,13 @@ impl Ui {
             d.stage = Stage::Done { success };
             d.receiver = None;
             d.input = None;
-            if !d.partial.is_empty() {
-                let last = std::mem::take(&mut d.partial);
-                d.output.push(last);
+            for last in [
+                std::mem::take(&mut d.partial_out),
+                std::mem::take(&mut d.partial_err),
+            ] {
+                if !last.is_empty() {
+                    d.output.push(last);
+                }
             }
             if success {
                 self.needs_reload = true;
@@ -1521,7 +1534,8 @@ impl Ui {
                         let _ = tx.send(answer.clone());
                     }
                     // Echo it, so the transcript shows what was answered.
-                    let shown = std::mem::take(&mut d.partial);
+                    d.partial_err.clear();
+                    let shown = std::mem::take(&mut d.partial_out);
                     d.output.push(format!("{shown}{answer}"));
                 }
                 _ => {}
