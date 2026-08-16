@@ -89,9 +89,19 @@ than an error.
 
 ## Installing
 
-The `PKGBUILD` builds from the `v0.1.0` tag of
-<https://github.com/ApollonG/Apothiki>. Until that tag is pushed, install from
-this checkout:
+Once it is on the AUR:
+
+```sh
+paru -S apothiki        # or: yay -S apothiki
+```
+
+From a checkout, without an AUR helper:
+
+```sh
+cd packaging && makepkg -si
+```
+
+Or just the binary, no package manager involved:
 
 ```sh
 cargo build --release
@@ -101,8 +111,7 @@ install -Dm755 target/release/apo ~/.local/bin/apo
 `~/.local/bin` is already on `PATH` on most Arch setups. Nothing else needs
 installing — configuration and caches are created on first use.
 
-Once the tag exists, `makepkg -si` works from the repository root. Replace
-`sha256sums=('SKIP')` with the real checksum first.
+Publishing a release is documented in [packaging/README.md](packaging/README.md).
 
 ## Licence
 

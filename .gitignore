@@ -1,1 +1,10 @@
 /target
+
+# makepkg's working directories. This is why the PKGBUILD lives in packaging/
+# rather than the repository root: makepkg uses ./src as its build directory and
+# `makepkg -C` removes it, which at the root would delete the Rust sources.
+/packaging/src/
+/packaging/pkg/
+/packaging/*.tar.gz
+/packaging/*.pkg.tar.zst
+/packaging/*.log
