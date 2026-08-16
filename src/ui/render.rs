@@ -218,7 +218,7 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
                 return;
             }
             if let Some(plan) = d.job.as_update() {
-                draw_update_confirm(f, popup, plan, d.snapshot);
+                draw_update_confirm(f, popup, plan, d.snapshot, d.interactive);
                 return;
             }
             if let Some(r) = d.job.as_flatpak() {
@@ -419,8 +419,29 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
                 ));
                 lines.push(Line::raw(""));
             }
-            for l in d.output.iter().rev().take(20).collect::<Vec<_>>().into_iter().rev() {
+            let budget = if d.input.is_some() { 18 } else { 20 };
+            for l in d.output.iter().rev().take(budget).collect::<Vec<_>>().into_iter().rev() {
                 lines.push(Line::raw(l.clone()));
+            }
+
+            // The incomplete line is where a prompt lives, so it is shown as it
+            // arrives rather than waiting for a newline that never comes.
+            if !d.partial.is_empty() {
+                lines.push(Line::styled(
+                    d.partial.clone(),
+                    Style::default().fg(WARN()).add_modifier(Modifier::BOLD),
+                ));
+            }
+            if d.input.is_some() && matches!(d.stage, Stage::Running) {
+                lines.push(Line::from(vec![
+                    Span::styled("answer: ", Style::default().fg(ACCENT())),
+                    Span::raw(d.answer.clone()),
+                    Span::styled("▏", Style::default().fg(ACCENT())),
+                ]));
+                lines.push(Line::styled(
+                    "type an answer and press Enter; empty Enter takes the default",
+                    Style::default().fg(DIM()),
+                ));
             }
             if let Some(e) = &d.error {
                 lines.push(Line::styled(e.clone(), Style::default().fg(DANGER())));
@@ -691,6 +712,7 @@ fn draw_update_confirm(
     popup: Rect,
     plan: &crate::ops::update::UpdatePlan,
     snapshot: bool,
+    interactive: bool,
 ) {
     let mut lines: Vec<Line> = vec![Line::styled(
         format!("{} update(s) available", plan.total()),
@@ -721,6 +743,10 @@ fn draw_update_confirm(
         lines.push(Line::styled(
             format!("AUR ({}) — rebuilt from source", plan.aur.len()),
             Style::default().fg(WARN()),
+        ));
+        lines.push(Line::styled(
+            "  These run after the repository upgrade, non-interactively.",
+            Style::default().fg(DIM()),
         ));
         for u in plan.aur.iter().take(6) {
             lines.push(Line::raw(format!(
@@ -757,12 +783,36 @@ fn draw_update_confirm(
         Style::default().fg(if snapshot { OK() } else { DIM() }),
     ));
     lines.push(Line::styled(
-        "$ sudo pacman -Syu".to_string(),
+        format!(
+            "[{}] answer pacman's questions myself  (a)",
+            if interactive { "x" } else { " " }
+        ),
+        Style::default().fg(if interactive { OK() } else { DIM() }),
+    ));
+    lines.push(Line::styled(
+        if interactive {
+            "  Replacements and conflicts will be asked here."
+        } else {
+            "  pacman will answer its own questions with the default, which"
+        },
+        Style::default().fg(DIM()),
+    ));
+    if !interactive {
+        lines.push(Line::styled(
+            "  for a conflict means \"no\" and aborts the upgrade.",
+            Style::default().fg(WARN()),
+        ));
+    }
+    lines.push(Line::styled(
+        format!(
+            "$ sudo pacman {}",
+            crate::ops::update::UpdatePlan::system_upgrade_args(!interactive).join(" ")
+        ),
         Style::default().fg(DIM()),
     ));
     lines.push(Line::raw(""));
     lines.push(Line::styled(
-        "Enter upgrade   Esc cancel".to_string(),
+        "Enter upgrade   a toggle answers   Ctrl+S snapshot   Esc cancel".to_string(),
         Style::default().fg(DIM()),
     ));
     render_popup(f, popup, " update ", lines);

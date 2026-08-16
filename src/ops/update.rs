@@ -102,13 +102,28 @@ impl UpdatePlan {
     }
 
     /// A full system upgrade. Never a subset — see the module note.
-    pub fn system_upgrade_args() -> Vec<String> {
-        vec!["-Syu".to_string(), "--noconfirm".to_string()]
+    ///
+    /// `--noconfirm` is optional and off by default here, unlike everywhere
+    /// else. Our dialog already confirms *whether* to upgrade, but a system
+    /// upgrade raises questions we cannot answer in advance — replacing a
+    /// package with its successor, choosing between providers, resolving a
+    /// conflict. `--noconfirm` answers each with pacman's default, and for a
+    /// conflict that default is "no", which aborts the entire transaction.
+    pub fn system_upgrade_args(noconfirm: bool) -> Vec<String> {
+        let mut v = vec!["-Syu".to_string()];
+        if noconfirm {
+            v.push("--noconfirm".to_string());
+        }
+        v
     }
 
     /// AUR upgrades, applied by the helper after the repo upgrade.
-    pub fn aur_upgrade_args() -> Vec<String> {
-        vec!["-Sua".to_string(), "--noconfirm".to_string()]
+    pub fn aur_upgrade_args(noconfirm: bool) -> Vec<String> {
+        let mut v = vec!["-Sua".to_string()];
+        if noconfirm {
+            v.push("--noconfirm".to_string());
+        }
+        v
     }
 }
 
@@ -238,12 +253,22 @@ mod tests {
         // -Syu must carry no package names: naming even one turns a full
         // upgrade into a partial one, which is the failure the whole design is
         // arranged around.
-        let args = UpdatePlan::system_upgrade_args();
+        let args = UpdatePlan::system_upgrade_args(true);
         assert_eq!(args[0], "-Syu");
         assert!(
             !args.iter().any(|a| !a.starts_with('-')),
             "no package names may appear: {args:?}"
         );
+    }
+
+    #[test]
+    fn an_interactive_upgrade_omits_noconfirm() {
+        // With --noconfirm pacman answers its own questions with the default,
+        // and the default for a conflict is "no" — which aborts everything.
+        let interactive = UpdatePlan::system_upgrade_args(false);
+        assert_eq!(interactive, ["-Syu"]);
+        assert!(UpdatePlan::system_upgrade_args(true).contains(&"--noconfirm".to_string()));
+        assert_eq!(UpdatePlan::aur_upgrade_args(false), ["-Sua"]);
     }
 
     #[test]

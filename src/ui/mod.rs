@@ -957,7 +957,20 @@ impl Ui {
 
         if let Some(plan) = d.job.as_update().cloned() {
             let (tx, rx) = std::sync::mpsc::channel();
-            removal::spawn_update(plan, crate::ops::find_aur_helper(), d.snapshot, tx);
+            // A channel for answers, so pacman's questions can be reached.
+            let (itx, irx) = std::sync::mpsc::channel();
+            let interactive = d.interactive;
+            removal::spawn_update(
+                plan,
+                crate::ops::find_aur_helper(),
+                d.snapshot,
+                interactive,
+                irx,
+                tx,
+            );
+            if interactive {
+                d.input = Some(itx);
+            }
             d.receiver = Some(rx);
             d.stage = Stage::Running;
             d.output.clear();
@@ -1133,7 +1146,11 @@ impl Ui {
             self.notice = Some("everything is up to date".into());
             return;
         }
-        self.dialog = Some(RemovalDialog::update(self.updates.clone()));
+        let mut dialog = RemovalDialog::update(self.updates.clone());
+        // A system upgrade is the one operation where pacman routinely asks
+        // something we cannot answer for the user in advance.
+        dialog.interactive = true;
+        self.dialog = Some(dialog);
     }
 
     /// Opens the file-locations pane for the current selection.
@@ -1366,7 +1383,12 @@ impl Ui {
         let mut finished: Option<bool> = None;
         while let Ok(msg) = rx.try_recv() {
             match msg {
-                crate::ops::exec::Output::Line(l) => d.output.push(l),
+                crate::ops::exec::Output::Line(l) => {
+                    d.partial.clear();
+                    d.output.push(l);
+                }
+                // The live fragment: a prompt, or a progress bar mid-redraw.
+                crate::ops::exec::Output::Partial(p) => d.partial = p,
                 crate::ops::exec::Output::Finished { success, .. } => finished = Some(success),
                 crate::ops::exec::Output::Failed(e) => {
                     d.error = Some(e);
@@ -1377,6 +1399,11 @@ impl Ui {
         if let Some(success) = finished {
             d.stage = Stage::Done { success };
             d.receiver = None;
+            d.input = None;
+            if !d.partial.is_empty() {
+                let last = std::mem::take(&mut d.partial);
+                d.output.push(last);
+            }
             if success {
                 self.needs_reload = true;
             }
@@ -1413,6 +1440,13 @@ impl Ui {
                     self.refresh_dialog_request();
                 }
                 KeyCode::Char('s') if ctrl => d.snapshot = !d.snapshot,
+                // A plain letter, not Ctrl+I: at the byte level Ctrl+I *is*
+                // Tab, so a terminal without the Kitty keyboard protocol —
+                // Konsole included — cannot tell them apart, and the binding
+                // silently does nothing (spec §8.1).
+                KeyCode::Char('a' | 'A') if d.job.as_update().is_some() => {
+                    d.interactive = !d.interactive
+                }
                 // AppImage components are individually optional.
                 KeyCode::Char('1') if d.job.as_appimage().is_some() => {
                     if let Some(a) = d.job.as_appimage_mut() {
@@ -1460,9 +1494,25 @@ impl Ui {
                 }
                 _ => {}
             },
-            // Output is streaming; only quitting the dialog is offered, and
-            // only once it has finished.
-            Stage::Running => {}
+            // While an interactive command runs, typing answers its prompts.
+            // Without this a question like "Replace X with Y? [Y/n]" stops the
+            // upgrade dead, since nothing can reach pacman's stdin.
+            Stage::Running => match key.code {
+                KeyCode::Char(c) if !ctrl && d.input.is_some() => d.answer.push(c),
+                KeyCode::Backspace if d.input.is_some() => {
+                    d.answer.pop();
+                }
+                KeyCode::Enter if d.input.is_some() => {
+                    let answer = std::mem::take(&mut d.answer);
+                    if let Some(tx) = &d.input {
+                        let _ = tx.send(answer.clone());
+                    }
+                    // Echo it, so the transcript shows what was answered.
+                    let shown = std::mem::take(&mut d.partial);
+                    d.output.push(format!("{shown}{answer}"));
+                }
+                _ => {}
+            },
             Stage::Done { .. } => match key.code {
                 KeyCode::Esc | KeyCode::Enter | KeyCode::Left => self.dialog = None,
                 _ => {}

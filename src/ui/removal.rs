@@ -153,6 +153,16 @@ pub struct RemovalDialog {
     pub confirm_word: String,
     /// When the running operation started, for the elapsed-time indicator.
     pub started: Option<std::time::Instant>,
+    /// The incomplete last line of output — where prompts appear.
+    pub partial: String,
+    /// What the user is typing in answer to a prompt.
+    pub answer: String,
+    /// Sends answers to the running command's stdin, when it is interactive.
+    pub input: Option<Sender<String>>,
+    /// Whether to let pacman ask its own questions rather than passing
+    /// `--noconfirm`. On for upgrades, where replacements and conflicts are
+    /// common and the default answer aborts the transaction.
+    pub interactive: bool,
     /// A fetched PKGBUILD, shown before an AUR install.
     pub pkgbuild: Option<String>,
     pub pkgbuild_scroll: u16,
@@ -180,6 +190,10 @@ impl RemovalDialog {
             pkgbuild_scroll: 0,
             pkgbuild_rx: None,
             started: None,
+            partial: String::new(),
+            answer: String::new(),
+            input: None,
+            interactive: false,
         }
     }
 
@@ -201,6 +215,10 @@ impl RemovalDialog {
             pkgbuild_scroll: 0,
             pkgbuild_rx: None,
             started: None,
+            partial: String::new(),
+            answer: String::new(),
+            input: None,
+            interactive: false,
         }
     }
 
@@ -276,6 +294,10 @@ impl RemovalDialog {
             pkgbuild_scroll: 0,
             pkgbuild_rx: None,
             started: None,
+            partial: String::new(),
+            answer: String::new(),
+            input: None,
+            interactive: false,
         }
     }
 
@@ -307,6 +329,10 @@ impl RemovalDialog {
             pkgbuild_scroll: 0,
             pkgbuild_rx: None,
             started: None,
+            partial: String::new(),
+            answer: String::new(),
+            input: None,
+            interactive: false,
         }
     }
 
@@ -327,6 +353,10 @@ impl RemovalDialog {
             pkgbuild_scroll: 0,
             pkgbuild_rx: None,
             started: None,
+            partial: String::new(),
+            answer: String::new(),
+            input: None,
+            interactive: false,
         }
     }
 
@@ -347,6 +377,10 @@ impl RemovalDialog {
             pkgbuild_scroll: 0,
             pkgbuild_rx: None,
             started: None,
+            partial: String::new(),
+            answer: String::new(),
+            input: None,
+            interactive: false,
         }
     }
 
@@ -652,6 +686,8 @@ pub fn spawn_update(
     plan: crate::ops::update::UpdatePlan,
     helper: Option<String>,
     take_snapshot: bool,
+    interactive: bool,
+    input: Receiver<String>,
     tx: Sender<Output>,
 ) {
     use crate::ops::update::UpdatePlan;
@@ -664,13 +700,16 @@ pub fn spawn_update(
             }
             let _ = tx.send(Output::Line(format!(
                 "would run: sudo pacman {}",
-                UpdatePlan::system_upgrade_args().join(" ")
+                UpdatePlan::system_upgrade_args(!interactive).join(" ")
             )));
             if !plan.aur.is_empty() {
+                // Reported exactly as it will run: the AUR half is not
+                // interactive, and a dry-run that claims otherwise is worse
+                // than useless.
                 let _ = tx.send(Output::Line(format!(
                     "would then run: {} {}",
                     helper.clone().unwrap_or_else(|| "paru".into()),
-                    UpdatePlan::aur_upgrade_args().join(" ")
+                    UpdatePlan::aur_upgrade_args(true).join(" ")
                 )));
             }
             let _ = tx.send(Output::Finished { success: true, code: Some(0) });
@@ -692,7 +731,16 @@ pub fn spawn_update(
             }
         }
 
-        let repo = exec::run_privileged("pacman", &UpdatePlan::system_upgrade_args(), &tx);
+        let repo = if interactive {
+            exec::run_privileged_interactive(
+                "pacman",
+                &UpdatePlan::system_upgrade_args(false),
+                input,
+                &tx,
+            )
+        } else {
+            exec::run_privileged("pacman", &UpdatePlan::system_upgrade_args(true), &tx)
+        };
         let mut success = repo.success;
 
         // AUR rebuilds only after the repository upgrade succeeded: building
@@ -700,7 +748,10 @@ pub fn spawn_update(
         // exists to avoid.
         if success && !plan.aur.is_empty() {
             if let Some(h) = &helper {
-                let aur = exec::run_unprivileged(h, &UpdatePlan::aur_upgrade_args(), &tx);
+                // The helper's own prompts cannot be forwarded once the repo
+                // upgrade has consumed the input channel, so this half stays
+                // non-interactive for now and says so.
+                let aur = exec::run_unprivileged(h, &UpdatePlan::aur_upgrade_args(true), &tx);
                 success = aur.success;
             } else {
                 let _ = tx.send(Output::Line(

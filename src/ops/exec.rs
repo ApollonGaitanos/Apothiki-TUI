@@ -26,9 +26,9 @@
 //! arguments containing spaces (a snapshot description, a cache path) arrive as
 //! single argv entries without escaping.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::process::{Command, Stdio};
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{Receiver, Sender};
 
 /// A password held only as long as it takes to hand to sudo.
 ///
@@ -135,6 +135,13 @@ pub fn authenticate(secret: &Secret) -> Result<(), String> {
 #[derive(Debug, Clone)]
 pub enum Output {
     Line(String),
+    /// The current incomplete line.
+    ///
+    /// **Prompts arrive this way.** `:: Proceed with installation? [Y/n] ` has
+    /// no trailing newline, so a reader that only emits complete lines never
+    /// shows it: the user sees nothing, the program waits for an answer to a
+    /// question it never displayed, and the operation appears to hang.
+    Partial(String),
     Finished { success: bool, code: Option<i32> },
     Failed(String),
 }
@@ -160,12 +167,57 @@ pub struct RunResult {
 /// a failure here means the timestamp expired and the caller should re-auth
 /// rather than hang waiting for input nobody can see.
 pub fn run_privileged(program: &str, args: &[String], tx: &Sender<Output>) -> RunResult {
-    let mut full: Vec<String> = vec!["-n".into(), program.into()];
-    full.extend(args.iter().cloned());
+    run_inner(program, args, true, None, tx)
+}
 
-    let child = Command::new("sudo")
+/// As `run_privileged`, but with a channel feeding the command's stdin.
+///
+/// This is what makes `pacman -Syu` usable without `--noconfirm`: pacman asks
+/// about replacements, providers and conflicts, and with `--noconfirm` it
+/// answers each with the *default* — which for a conflict is "no", aborting the
+/// whole transaction. Letting the user answer is not a convenience, it is the
+/// difference between an upgrade that completes and one that cannot.
+pub fn run_privileged_interactive(
+    program: &str,
+    args: &[String],
+    input: Receiver<String>,
+    tx: &Sender<Output>,
+) -> RunResult {
+    run_inner(program, args, true, Some(input), tx)
+}
+
+pub fn run_unprivileged_interactive(
+    program: &str,
+    args: &[String],
+    input: Receiver<String>,
+    tx: &Sender<Output>,
+) -> RunResult {
+    run_inner(program, args, false, Some(input), tx)
+}
+
+/// Streams a child's output, optionally feeding it input.
+fn run_inner(
+    program: &str,
+    args: &[String],
+    privileged: bool,
+    input: Option<Receiver<String>>,
+    tx: &Sender<Output>,
+) -> RunResult {
+    let (cmd, full): (&str, Vec<String>) = if privileged {
+        let mut v: Vec<String> = vec!["-n".into(), program.into()];
+        v.extend(args.iter().cloned());
+        ("sudo", v)
+    } else {
+        (program, args.to_vec())
+    };
+
+    let child = Command::new(cmd)
         .args(&full)
-        .stdin(Stdio::null())
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn();
@@ -173,7 +225,7 @@ pub fn run_privileged(program: &str, args: &[String], tx: &Sender<Output>) -> Ru
     let mut child = match child {
         Ok(c) => c,
         Err(e) => {
-            let msg = format!("could not start sudo: {e}");
+            let msg = format!("could not start {cmd}: {e}");
             let _ = tx.send(Output::Failed(msg.clone()));
             return RunResult {
                 success: false,
@@ -183,6 +235,19 @@ pub fn run_privileged(program: &str, args: &[String], tx: &Sender<Output>) -> Ru
         }
     };
 
+    // Answers are written from their own thread so a user who types nothing
+    // never blocks the readers.
+    if let (Some(rx), Some(mut stdin)) = (input, child.stdin.take()) {
+        std::thread::spawn(move || {
+            for line in rx {
+                if stdin.write_all(line.as_bytes()).is_err() || stdin.write_all(b"\n").is_err() {
+                    return;
+                }
+                let _ = stdin.flush();
+            }
+        });
+    }
+
     let mut lines: Vec<String> = Vec::new();
 
     // stderr is drained on its own thread. Reading the two streams in sequence
@@ -190,21 +255,11 @@ pub fn run_privileged(program: &str, args: &[String], tx: &Sender<Output>) -> Ru
     // the other — and pacman writes its progress to stderr.
     let err_handle = child.stderr.take().map(|err| {
         let tx = tx.clone();
-        std::thread::spawn(move || {
-            let mut collected = Vec::new();
-            for line in BufReader::new(err).lines().map_while(Result::ok) {
-                let _ = tx.send(Output::Line(line.clone()));
-                collected.push(line);
-            }
-            collected
-        })
+        std::thread::spawn(move || pump(err, &tx))
     });
 
     if let Some(out) = child.stdout.take() {
-        for line in BufReader::new(out).lines().map_while(Result::ok) {
-            let _ = tx.send(Output::Line(line.clone()));
-            lines.push(line);
-        }
+        lines.extend(pump(out, tx));
     }
     if let Some(h) = err_handle {
         if let Ok(collected) = h.join() {
@@ -229,6 +284,46 @@ pub fn run_privileged(program: &str, args: &[String], tx: &Sender<Output>) -> Ru
     }
 }
 
+/// Reads a stream byte-wise, emitting complete lines and the trailing fragment.
+///
+/// Byte-wise rather than by line because a prompt is a fragment: it ends in a
+/// space, not a newline, and waiting for one means never showing the question.
+fn pump(stream: impl std::io::Read, tx: &Sender<Output>) -> Vec<String> {
+    use std::io::Read;
+
+    let mut reader = std::io::BufReader::new(stream);
+    let mut buf = [0u8; 4096];
+    let mut pending = String::new();
+    let mut lines = Vec::new();
+
+    loop {
+        let n = match reader.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        pending.push_str(&String::from_utf8_lossy(&buf[..n]));
+
+        while let Some(i) = pending.find('\n') {
+            let line: String = pending.drain(..=i).collect();
+            let line = line.trim_end_matches(['\n', '\r']).to_string();
+            let _ = tx.send(Output::Line(line.clone()));
+            lines.push(line);
+        }
+        if !pending.is_empty() {
+            // Carriage returns are progress-bar redraws; only the last matters.
+            let shown = pending.rsplit('\r').next().unwrap_or(&pending).to_string();
+            let _ = tx.send(Output::Partial(shown));
+        }
+    }
+
+    if !pending.is_empty() {
+        let line = pending.trim_end().to_string();
+        let _ = tx.send(Output::Line(line.clone()));
+        lines.push(line);
+    }
+    lines
+}
+
 /// Runs a command as the current user, streaming its output.
 ///
 /// AUR helpers must not run under sudo — they refuse to, and rightly: makepkg
@@ -236,61 +331,7 @@ pub fn run_privileged(program: &str, args: &[String], tx: &Sender<Output>) -> Ru
 /// the machine. The helper escalates by itself for the final install, which
 /// does not prompt because the sudo timestamp is already warm.
 pub fn run_unprivileged(program: &str, args: &[String], tx: &Sender<Output>) -> RunResult {
-    let child = Command::new(program)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn();
-
-    let mut child = match child {
-        Ok(c) => c,
-        Err(e) => {
-            let msg = format!("could not start {program}: {e}");
-            let _ = tx.send(Output::Failed(msg.clone()));
-            return RunResult {
-                success: false,
-                code: None,
-                lines: vec![msg],
-            };
-        }
-    };
-
-    let mut lines: Vec<String> = Vec::new();
-    let err_handle = child.stderr.take().map(|err| {
-        let tx = tx.clone();
-        std::thread::spawn(move || {
-            let mut collected = Vec::new();
-            for line in BufReader::new(err).lines().map_while(Result::ok) {
-                let _ = tx.send(Output::Line(line.clone()));
-                collected.push(line);
-            }
-            collected
-        })
-    });
-    if let Some(out) = child.stdout.take() {
-        for line in BufReader::new(out).lines().map_while(Result::ok) {
-            let _ = tx.send(Output::Line(line.clone()));
-            lines.push(line);
-        }
-    }
-    if let Some(h) = err_handle {
-        if let Ok(collected) = h.join() {
-            lines.extend(collected);
-        }
-    }
-
-    match child.wait() {
-        Ok(status) => RunResult {
-            success: status.success(),
-            code: status.code(),
-            lines,
-        },
-        Err(e) => {
-            let _ = tx.send(Output::Failed(e.to_string()));
-            RunResult { success: false, code: None, lines }
-        }
-    }
+    run_inner(program, args, false, None, tx)
 }
 
 /// Runs `pacman --print` and returns the packages it would remove.
@@ -391,5 +432,79 @@ mod tests {
         let theirs = vec!["ca-certificates-utils-20240618-1".to_string()];
         let ours = vec!["ca-certificates-utils".to_string()];
         assert!(reconcile(&ours, &theirs, &known).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod interactive_tests {
+    use super::*;
+
+    /// A prompt with no trailing newline must reach the caller as `Partial`.
+    ///
+    /// This is the whole reason the reader is byte-wise. With a line-based
+    /// reader this assertion never fires: the question is never displayed and
+    /// the operation simply appears to hang.
+    #[test]
+    fn a_prompt_without_a_newline_is_delivered_and_answerable() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (itx, irx) = std::sync::mpsc::channel();
+
+        // Answered from another thread, after a pause. `run_inner` blocks until
+        // the child exits, so answering afterwards deadlocks; answering
+        // instantly is no better a test, because the prompt and the echo then
+        // arrive in a single read and the partial state is never observed. A
+        // real user takes a moment, and that moment is the thing under test.
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            let _ = itx.send("yes".to_string());
+        });
+
+        // `sh` is the subject under test, not a way to run our own commands:
+        // it is the cheapest program that reproduces pacman's prompt shape.
+        let result = run_inner(
+            "sh",
+            &[
+                "-c".to_string(),
+                "printf ':: Proceed? [Y/n] '; read a; echo \"got:$a\"".to_string(),
+            ],
+            false,
+            Some(irx),
+            &tx,
+        );
+        assert!(result.success);
+
+        let msgs: Vec<Output> = rx.try_iter().collect();
+        assert!(
+            msgs.iter()
+                .any(|m| matches!(m, Output::Partial(p) if p.contains("Proceed?"))),
+            "the prompt must arrive before any newline does: {msgs:?}"
+        );
+        assert!(
+            result.lines.iter().any(|l| l.contains("got:yes")),
+            "the answer must reach the command's stdin: {:?}",
+            result.lines
+        );
+    }
+
+    #[test]
+    fn complete_lines_still_arrive_as_lines() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let result = run_inner(
+            "sh",
+            &["-c".to_string(), "echo one; echo two".to_string()],
+            false,
+            None,
+            &tx,
+        );
+        assert!(result.success);
+        let lines: Vec<String> = rx
+            .try_iter()
+            .filter_map(|m| match m {
+                Output::Line(l) => Some(l),
+                _ => None,
+            })
+            .collect();
+        assert!(lines.contains(&"one".to_string()), "{lines:?}");
+        assert!(lines.contains(&"two".to_string()), "{lines:?}");
     }
 }
