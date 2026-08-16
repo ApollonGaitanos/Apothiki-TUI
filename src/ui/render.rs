@@ -177,7 +177,13 @@ fn selection_style(focused: bool) -> Style {
             .fg(Color::Black)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD)
+        // Themed rather than a hardcoded DarkGray: an unfocused pane still has
+        // a selected row, and it should recede in the user's palette rather
+        // than in whatever the terminal calls grey.
+        Style::default()
+            .bg(DIM())
+            .fg(Color::Black)
+            .add_modifier(Modifier::BOLD)
     }
 }
 
@@ -1460,11 +1466,20 @@ fn size_suffix(ui: &Ui, app: &crate::apps::App) -> String {
     }
 }
 
+/// Where an application came from, as a badge colour.
+///
+/// These two are the only colours outside the configurable palette: they label
+/// a category rather than convey a state, and there is nothing in `Theme` they
+/// could honestly borrow. Raw ANSI blue and magenta were glaring next to the
+/// rest, so they are chosen from the same soft family.
+const FLATPAK_TAG: Color = Color::Rgb(0x94, 0xe2, 0xd5);
+const APPIMAGE_TAG: Color = Color::Rgb(0xcb, 0xa6, 0xf7);
+
 fn source_tag(source: Source) -> (&'static str, Color) {
     match source {
         Source::Pacman => ("pkg", Color::Reset),
-        Source::Flatpak => ("flat", Color::Blue),
-        Source::AppImage => ("img", Color::Magenta),
+        Source::Flatpak => ("flat", FLATPAK_TAG),
+        Source::AppImage => ("img", APPIMAGE_TAG),
         Source::Steam => ("steam", DIM()),
         Source::Unowned => ("?", WARN()),
     }
