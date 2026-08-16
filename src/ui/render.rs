@@ -190,11 +190,23 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
     let popup = centred(area, 86, 28);
 
     let mut lines: Vec<Line> = Vec::new();
+    let (noun, verb) = d.verb();
     let title = match &d.stage {
-        Stage::Running => " removing… ",
-        Stage::Done { success: true } => " done ",
-        Stage::Done { success: false } => " failed ",
-        _ => " remove ",
+        Stage::Running => {
+            // A spinner and a clock, because "is it stuck?" is the only
+            // question a user has while a build runs, and a wall of git output
+            // that has paused for thirty seconds does not answer it.
+            let millis = d.elapsed().map(|e| e.as_millis()).unwrap_or(0);
+            let secs = millis / 1000;
+            const FRAMES: [char; 8] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧'];
+            // Driven by the clock, not by output: the whole point is to keep
+            // moving while nothing is being printed.
+            let frame = FRAMES[(millis / 125) as usize % FRAMES.len()];
+            format!(" {frame} {verb}…  {}m{:02}s ", secs / 60, secs % 60)
+        }
+        Stage::Done { success: true } => " done ".to_string(),
+        Stage::Done { success: false } => " failed ".to_string(),
+        _ => format!(" {noun} "),
     };
 
     match &d.stage {
@@ -247,7 +259,7 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
                     Style::default().fg(DIM()),
                 ));
                 lines.push(Line::styled("Esc to close", Style::default().fg(DIM())));
-                render_popup(f, popup, title, lines);
+                render_popup(f, popup, &title, lines);
                 return;
             }
 
@@ -269,7 +281,7 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
                     Style::default().fg(DIM()),
                 ));
                 lines.push(Line::styled("Esc to close", Style::default().fg(DIM())));
-                render_popup(f, popup, title, lines);
+                render_popup(f, popup, &title, lines);
                 return;
             }
 
@@ -400,6 +412,13 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
             lines.push(Line::styled("Enter confirm   Esc cancel", Style::default().fg(DIM())));
         }
         Stage::Running | Stage::Done { .. } => {
+            if matches!(d.stage, Stage::Running) && d.output.len() < 3 {
+                lines.push(Line::styled(
+                    "Working. AUR packages are compiled here, which can take a while.",
+                    Style::default().fg(DIM()),
+                ));
+                lines.push(Line::raw(""));
+            }
             for l in d.output.iter().rev().take(20).collect::<Vec<_>>().into_iter().rev() {
                 lines.push(Line::raw(l.clone()));
             }
@@ -412,8 +431,16 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
                     lines.push(Line::styled("Esc to close", Style::default().fg(DIM())));
                 }
                 Stage::Done { success: false } => {
+                    // Never claim nothing changed: an install that fails at the
+                    // last step has still installed every dependency before it,
+                    // and telling the user otherwise sends them looking for a
+                    // clean system that is not there.
                     lines.push(Line::styled(
-                        "Nothing was changed.",
+                        "This did not finish. Anything logged above as installed,",
+                        Style::default().fg(WARN()),
+                    ));
+                    lines.push(Line::styled(
+                        "removed or snapshotted already happened.",
                         Style::default().fg(WARN()),
                     ));
                     lines.push(Line::styled("Esc to close", Style::default().fg(DIM())));
@@ -423,7 +450,7 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
         }
     }
 
-    render_popup(f, popup, title, lines);
+    render_popup(f, popup, &title, lines);
 }
 
 /// The PKGBUILD review pane.

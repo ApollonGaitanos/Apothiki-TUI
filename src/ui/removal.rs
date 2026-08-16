@@ -151,6 +151,8 @@ pub struct RemovalDialog {
     pub receiver: Option<Receiver<Output>>,
     /// The exact name the user must type, cached so it cannot drift.
     pub confirm_word: String,
+    /// When the running operation started, for the elapsed-time indicator.
+    pub started: Option<std::time::Instant>,
     /// A fetched PKGBUILD, shown before an AUR install.
     pub pkgbuild: Option<String>,
     pub pkgbuild_scroll: u16,
@@ -177,6 +179,7 @@ impl RemovalDialog {
             pkgbuild: None,
             pkgbuild_scroll: 0,
             pkgbuild_rx: None,
+            started: None,
         }
     }
 
@@ -197,6 +200,7 @@ impl RemovalDialog {
             pkgbuild: None,
             pkgbuild_scroll: 0,
             pkgbuild_rx: None,
+            started: None,
         }
     }
 
@@ -207,6 +211,27 @@ impl RemovalDialog {
 
     pub fn mode(&self) -> RemovalMode {
         RemovalMode::ALL[self.mode_index]
+    }
+
+    /// What this job is doing, as a verb. Used for the dialog title.
+    ///
+    /// A dialog headed "removing…" during an install is not a cosmetic problem:
+    /// it tells the user the tool is doing the opposite of what they asked, at
+    /// the exact moment they are least able to check.
+    pub fn verb(&self) -> (&'static str, &'static str) {
+        match &self.job {
+            Job::Remove(_) => ("remove", "removing"),
+            Job::Restore(_) => ("undo", "restoring"),
+            Job::Install(_) => ("install", "installing"),
+            Job::Update(_) | Job::SingleUpdate(_) => ("update", "upgrading"),
+            Job::RemoveFlatpak(_) => ("remove flatpak", "removing"),
+            Job::RemoveAppImage(_) => ("remove appimage", "deleting"),
+        }
+    }
+
+    /// How long the current operation has been running.
+    pub fn elapsed(&self) -> Option<std::time::Duration> {
+        self.started.map(|t| t.elapsed())
     }
 
     /// Whether this job may proceed at all.
@@ -250,6 +275,7 @@ impl RemovalDialog {
             pkgbuild: None,
             pkgbuild_scroll: 0,
             pkgbuild_rx: None,
+            started: None,
         }
     }
 
@@ -280,6 +306,7 @@ impl RemovalDialog {
             pkgbuild: None,
             pkgbuild_scroll: 0,
             pkgbuild_rx: None,
+            started: None,
         }
     }
 
@@ -299,6 +326,7 @@ impl RemovalDialog {
             pkgbuild: None,
             pkgbuild_scroll: 0,
             pkgbuild_rx: None,
+            started: None,
         }
     }
 
@@ -318,6 +346,7 @@ impl RemovalDialog {
             pkgbuild: None,
             pkgbuild_scroll: 0,
             pkgbuild_rx: None,
+            started: None,
         }
     }
 

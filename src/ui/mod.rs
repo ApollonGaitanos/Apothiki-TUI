@@ -930,6 +930,7 @@ impl Ui {
             d.receiver = Some(rx);
             d.stage = Stage::Running;
             d.output.clear();
+            d.started = Some(std::time::Instant::now());
             return;
         }
 
@@ -939,6 +940,7 @@ impl Ui {
             d.receiver = Some(rx);
             d.stage = Stage::Running;
             d.output.clear();
+            d.started = Some(std::time::Instant::now());
             return;
         }
 
@@ -948,6 +950,7 @@ impl Ui {
             d.receiver = Some(rx);
             d.stage = Stage::Running;
             d.output.clear();
+            d.started = Some(std::time::Instant::now());
             self.state.db_locked = false;
             return;
         }
@@ -958,6 +961,7 @@ impl Ui {
             d.receiver = Some(rx);
             d.stage = Stage::Running;
             d.output.clear();
+            d.started = Some(std::time::Instant::now());
             self.state.db_locked = false;
             return;
         }
@@ -968,6 +972,7 @@ impl Ui {
             d.receiver = Some(rx);
             d.stage = Stage::Running;
             d.output.clear();
+            d.started = Some(std::time::Instant::now());
             self.state.db_locked = false;
             return;
         }
@@ -980,6 +985,7 @@ impl Ui {
             d.receiver = Some(rx);
             d.stage = Stage::Running;
             d.output.clear();
+            d.started = Some(std::time::Instant::now());
             return;
         }
 
@@ -1007,6 +1013,7 @@ impl Ui {
         d.receiver = Some(rx);
         d.stage = Stage::Running;
         d.output.clear();
+        d.started = Some(std::time::Instant::now());
         // The lock is about to be ours; a stale "another pacman is running"
         // banner over our own operation is worse than no banner.
         self.state.db_locked = false;
