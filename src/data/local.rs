@@ -30,6 +30,10 @@ pub struct OptDep {
     pub reason: Option<String>,
 }
 
+// Mirrors the on-disk record rather than only the parts currently consumed.
+// Dropping a field would mean the parser silently discards it, and the next
+// reader of this struct would have no way to tell that a `desc` file carries it at all.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct Package {
     pub name: String,

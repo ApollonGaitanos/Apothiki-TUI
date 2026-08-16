@@ -12,6 +12,10 @@
 use std::collections::HashMap;
 use std::process::Command;
 
+// Mirrors the on-disk record rather than only the parts currently consumed.
+// Dropping a field would mean the parser silently discards it, and the next
+// reader of this struct would have no way to tell that `flatpak list` carries it at all.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct FlatpakApp {
     /// Application id, e.g. `app.zen_browser.zen`. Matches the exported

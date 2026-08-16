@@ -245,11 +245,11 @@ mod tests {
         let f = dir.join("thing.AppImage");
         std::fs::write(&f, b"not really").unwrap();
 
-        assert!(scan_dirs(&[dir.clone()]).is_empty(), "no execute bit yet");
+        assert!(scan_dirs(std::slice::from_ref(&dir)).is_empty(), "no execute bit yet");
 
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert_eq!(scan_dirs(&[dir.clone()]).len(), 1);
+        assert_eq!(scan_dirs(std::slice::from_ref(&dir)).len(), 1);
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

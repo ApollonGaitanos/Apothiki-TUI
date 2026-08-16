@@ -77,6 +77,9 @@ impl AurIndex {
         self.packages.len()
     }
 
+    // Required by clippy alongside `len`, which is why it exists at all;
+    // nothing calls it today.
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.packages.is_empty()
     }

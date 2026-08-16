@@ -13,6 +13,10 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+// Mirrors the on-disk record rather than only the parts currently consumed.
+// Dropping a field would mean the parser silently discards it, and the next
+// reader of this struct would have no way to tell that a `.desktop` file carries it at all.
+#[allow(dead_code)]
 /// A parsed `[Desktop Entry]` group.
 ///
 /// Only the keys app discovery needs are lifted into fields; the rest stay in

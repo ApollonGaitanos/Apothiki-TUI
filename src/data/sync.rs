@@ -22,6 +22,10 @@ use std::path::{Path, PathBuf};
 use crate::data::dep::Dep;
 use crate::data::descfmt::{deps, many, one, parse_sections};
 
+// Mirrors the on-disk record rather than only the parts currently consumed.
+// Dropping a field would mean the parser silently discards it, and the next
+// reader of this struct would have no way to tell that a sync database entry carries it at all.
+#[allow(dead_code)]
 /// A package as described by a repository, i.e. available rather than installed.
 #[derive(Debug, Clone)]
 pub struct SyncPackage {

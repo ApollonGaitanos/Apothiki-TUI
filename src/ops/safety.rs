@@ -175,6 +175,9 @@ impl Denylist {
         self.protected.len()
     }
 
+    // Required by clippy alongside `len`, which is why it exists at all;
+    // nothing calls it today.
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.protected.is_empty()
     }

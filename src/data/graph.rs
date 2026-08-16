@@ -260,6 +260,9 @@ impl Graph {
         self.db.packages.len()
     }
 
+    // Required by clippy alongside `len`, which is why it exists at all;
+    // nothing calls it today.
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.db.packages.is_empty()
     }
@@ -557,7 +560,10 @@ mod tests {
 
     /// Builds a `LocalDb` from terse `(name, reason, depends, provides,
     /// optdepends)` tuples so graph behaviour can be asserted without fixtures.
-    fn db_of(specs: &[(&str, Reason, &[&str], &[&str], &[&str])]) -> LocalDb {
+    /// name, install reason, depends, provides, optdepends.
+    type Spec<'a> = (&'a str, Reason, &'a [&'a str], &'a [&'a str], &'a [&'a str]);
+
+    fn db_of(specs: &[Spec]) -> LocalDb {
         let mut packages: Vec<_> = specs
             .iter()
             .map(|(name, reason, deps, provides, optdeps)| {

@@ -19,7 +19,6 @@ use std::sync::OnceLock;
 /// A decoded icon, ready to hand to the image widget.
 pub struct Icon {
     pub rgba: image::RgbaImage,
-    pub source: PathBuf,
 }
 
 /// Icon theme directories, in search order.
@@ -232,10 +231,7 @@ pub fn load(path: &Path) -> Option<Icon> {
         image::load_from_memory(&data).ok()?.to_rgba8()
     };
 
-    Some(Icon {
-        rgba,
-        source: path.to_path_buf(),
-    })
+    Some(Icon { rgba })
 }
 
 /// Sniffs for SVG, which has no magic number of its own.

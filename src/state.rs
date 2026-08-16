@@ -12,21 +12,16 @@ use crate::config::Config;
 use crate::data::fileindex::FileIndex;
 use crate::data::graph::Graph;
 use crate::data::local::LocalDb;
-use crate::data::sync::SyncDb;
 
 pub struct SystemState {
     pub db: Arc<LocalDb>,
     pub graph: Graph,
     pub index: FileIndex,
     pub catalog: Catalog,
-    /// Repository data. Optional because it is the slowest thing to load
-    /// (~260 ms) and nothing in M1's views needs it on the first frame.
-    pub sync: Option<SyncDb>,
     /// True while another pacman process holds the database lock. Mutations
     /// must be disabled and a banner shown; M1 has no mutations, but the
     /// detection belongs with the data (spec §5.1).
     pub db_locked: bool,
-    pub load_time: std::time::Duration,
 }
 
 impl SystemState {
@@ -45,8 +40,6 @@ impl SystemState {
     }
 
     fn load_inner(suffixes: &[String], noise: &[String]) -> anyhow::Result<Self> {
-        let started = std::time::Instant::now();
-
         let db = Arc::new(LocalDb::load(LocalDb::DEFAULT_ROOT)?);
         let (index, _) = FileIndex::load_or_build(&db);
 
@@ -59,9 +52,7 @@ impl SystemState {
             graph,
             index,
             catalog,
-            sync: None,
             db_locked: is_db_locked(),
-            load_time: started.elapsed(),
         })
     }
 }

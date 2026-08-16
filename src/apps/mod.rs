@@ -88,7 +88,6 @@ pub struct App {
     pub exec: Option<String>,
     pub desktop_id: Option<String>,
     /// Reverse-DNS AppStream id, when Layer 1 had something to say.
-    pub appstream_id: Option<String>,
     /// Backing packages, primary first.
     pub packages: Vec<String>,
     pub source: Source,
@@ -183,7 +182,6 @@ pub fn resolve(
             },
             exec: entry.exec.clone(),
             desktop_id: Some(entry.id.clone()),
-            appstream_id: component.map(|c| c.id.clone()),
             source: if owner.is_some() {
                 Source::Pacman
             } else {
@@ -299,7 +297,6 @@ fn attribute_unowned(catalog: &mut Catalog) {
             categories: Vec::new(),
             exec: Some(img.path.display().to_string()),
             desktop_id: None,
-            appstream_id: None,
             packages: Vec::new(),
             source: Source::AppImage,
             evidence: vec![Evidence::AppImageFile(img.path.display().to_string())],
@@ -349,7 +346,6 @@ fn add_explicit_tools(catalog: &mut Catalog, db: &LocalDb, index: &FileIndex) {
             categories: Vec::new(),
             exec: binary.clone(),
             desktop_id: None,
-            appstream_id: None,
             packages: vec![pkg.name.clone()],
             source: Source::Pacman,
             evidence: vec![match binary {
@@ -465,7 +461,6 @@ mod tests {
                 categories: vec![],
                 exec: None,
                 desktop_id: None,
-                appstream_id: None,
                 packages: vec!["gimp".into()],
                 source: Source::Pacman,
                 evidence: vec![],
@@ -477,7 +472,6 @@ mod tests {
                 categories: vec![],
                 exec: None,
                 desktop_id: None,
-                appstream_id: None,
                 packages: vec!["gimp-help-en".into()],
                 source: Source::Pacman,
                 evidence: vec![],

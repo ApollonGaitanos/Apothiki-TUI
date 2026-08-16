@@ -341,23 +341,6 @@ pub fn parse_key(s: &str) -> Option<(KeyCode, KeyModifiers)> {
     Some((code, mods))
 }
 
-fn describe_key(code: KeyCode, mods: KeyModifiers) -> String {
-    let base = match code {
-        KeyCode::Char(' ') => "Space".to_string(),
-        KeyCode::Char(c) => c.to_string(),
-        KeyCode::F(n) => format!("F{n}"),
-        KeyCode::Delete => "Del".to_string(),
-        KeyCode::Tab => "Tab".to_string(),
-        KeyCode::BackTab => "Shift+Tab".to_string(),
-        other => format!("{other:?}"),
-    };
-    if mods.contains(KeyModifiers::CONTROL) {
-        format!("Ctrl+{base}")
-    } else {
-        base
-    }
-}
-
 impl Config {
     pub fn path() -> Option<PathBuf> {
         let base = std::env::var_os("XDG_CONFIG_HOME")

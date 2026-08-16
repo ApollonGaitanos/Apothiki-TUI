@@ -150,7 +150,6 @@ pub struct Ui {
     pub focus: Focus,
     /// Selected row per view, so switching tabs does not lose your place.
     pub selected: HashMap<View, usize>,
-    pub scroll: usize,
     pub related_selected: usize,
     pub query: String,
     pub searching: bool,
@@ -190,7 +189,6 @@ pub struct Ui {
     pub keymap: Keymap,
     pub theme: Theme,
     /// Reported once at startup when the config could not be read.
-    pub config_error: Option<String>,
     /// Terminal graphics backend, probed once at startup.
     pub picker: Option<ratatui_image::picker::Picker>,
     /// Repository databases, loaded in the background: ~260 ms that nothing in
@@ -226,11 +224,6 @@ pub struct Ui {
 }
 
 impl Ui {
-    /// Everything derived from a `SystemState`, rebuilt whenever it is replaced.
-    fn derive(state: &SystemState) -> Derived {
-        Self::derive_with(state, &[])
-    }
-
     fn derive_with(state: &SystemState, also_protect: &[String]) -> Derived {
         let mut apps_by_package: HashMap<String, Vec<usize>> = HashMap::new();
         let mut apps_named_by_package: HashMap<String, Vec<String>> = HashMap::new();
@@ -281,7 +274,6 @@ impl Ui {
             view: View::Apps,
             focus: Focus::List,
             selected: HashMap::new(),
-            scroll: 0,
             related_selected: 0,
             query: String::new(),
             searching: false,
@@ -302,7 +294,6 @@ impl Ui {
             config,
             keymap,
             theme,
-            config_error,
             sync: None,
             sync_rx: None,
             aur: None,
@@ -1421,7 +1412,18 @@ impl Ui {
                     crate::ops::exec::Stream::Stdout => d.partial_out = p,
                     crate::ops::exec::Stream::Stderr => d.partial_err = p,
                 },
-                crate::ops::exec::Output::Finished { success, .. } => finished = Some(success),
+                crate::ops::exec::Output::Finished { success, code } => {
+                    // The status was already being carried all the way here and
+                    // then dropped. On a failure it is often the only clue
+                    // about *how* the command failed, so it goes in the log the
+                    // user is looking at.
+                    if !success {
+                        if let Some(c) = code {
+                            d.output.push(format!("(exited with status {c})"));
+                        }
+                    }
+                    finished = Some(success);
+                }
                 crate::ops::exec::Output::Failed(e) => {
                     d.error = Some(e);
                     finished = Some(false);
@@ -1755,16 +1757,6 @@ impl Ui {
             }
         }
         true
-    }
-
-    fn toggle_focus(&mut self) {
-        self.focus = match self.focus {
-            Focus::List => {
-                self.related_selected = 1.min(self.related_rows().len().saturating_sub(1));
-                Focus::Related
-            }
-            Focus::Related => Focus::List,
-        };
     }
 
     /// Right / Enter: move one step deeper.

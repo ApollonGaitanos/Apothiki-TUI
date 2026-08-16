@@ -174,22 +174,6 @@ pub struct RunResult {
     pub lines: Vec<String>,
 }
 
-/// Runs a privileged command, streaming its output to `tx` as it arrives.
-///
-/// **Streams rather than collects.** The obvious shape — run the command into a
-/// local channel, then forward that channel — does not stream at all: the run
-/// completes before forwarding begins, so the user watches a frozen dialog and
-/// then sees the whole log at once, exactly when it has stopped being useful.
-/// Lines go straight to the caller's channel here, and the summary is returned
-/// rather than sent, so the caller decides when the operation is "finished".
-///
-/// Uses `sudo -n`, which never prompts: authentication has already happened, so
-/// a failure here means the timestamp expired and the caller should re-auth
-/// rather than hang waiting for input nobody can see.
-pub fn run_privileged(program: &str, args: &[String], tx: &Sender<Output>) -> RunResult {
-    run_inner(program, args, true, None, tx)
-}
-
 /// A non-interactive command whose pid is published, so Ctrl+C can stop it.
 ///
 /// Every operation should be interruptible, not only the ones that ask
@@ -304,18 +288,7 @@ pub fn run_unprivileged_interactive(
     run_tracked(program, args, false, Some(slot), Some(pids), tx)
 }
 
-/// Streams a child's output, optionally feeding it input.
-fn run_inner(
-    program: &str,
-    args: &[String],
-    privileged: bool,
-    slot: Option<&StdinSlot>,
-    tx: &Sender<Output>,
-) -> RunResult {
-    run_tracked(program, args, privileged, slot, None, tx)
-}
-
-/// As `run_inner`, also publishing the child's pid so it can be interrupted.
+/// As `run_tracked`, also publishing the child's pid so it can be interrupted.
 fn run_tracked(
     program: &str,
     args: &[String],
@@ -458,16 +431,6 @@ fn pump(stream: impl std::io::Read, which: Stream, tx: &Sender<Output>) -> Vec<S
     lines
 }
 
-/// Runs a command as the current user, streaming its output.
-///
-/// AUR helpers must not run under sudo — they refuse to, and rightly: makepkg
-/// compiles untrusted source, and doing that as root hands a malicious PKGBUILD
-/// the machine. The helper escalates by itself for the final install, which
-/// does not prompt because the sudo timestamp is already warm.
-pub fn run_unprivileged(program: &str, args: &[String], tx: &Sender<Output>) -> RunResult {
-    run_inner(program, args, false, None, tx)
-}
-
 /// Runs `pacman --print` and returns the packages it would remove.
 ///
 /// **This is the gate before any real removal.** Our in-process simulation is
@@ -583,7 +546,7 @@ mod interactive_tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let (itx, irx) = std::sync::mpsc::channel();
 
-        // Answered from another thread, after a pause. `run_inner` blocks until
+        // Answered from another thread, after a pause. `run_tracked` blocks until
         // the child exits, so answering afterwards deadlocks; answering
         // instantly is no better a test, because the prompt and the echo then
         // arrive in a single read and the partial state is never observed. A
@@ -597,7 +560,7 @@ mod interactive_tests {
 
         // `sh` is the subject under test, not a way to run our own commands:
         // it is the cheapest program that reproduces pacman's prompt shape.
-        let result = run_inner(
+        let result = run_tracked(
             "sh",
             &[
                 "-c".to_string(),
@@ -605,6 +568,7 @@ mod interactive_tests {
             ],
             false,
             Some(&slot),
+            None,
             &tx,
         );
         assert!(result.success);
@@ -643,8 +607,8 @@ mod interactive_tests {
         });
 
         let script = "read a; echo \"got:$a\"".to_string();
-        let one = run_inner("sh", &["-c".to_string(), script.clone()], false, Some(&slot), &tx);
-        let two = run_inner("sh", &["-c".to_string(), script], false, Some(&slot), &tx);
+        let one = run_tracked("sh", &["-c".to_string(), script.clone()], false, Some(&slot), None, &tx);
+        let two = run_tracked("sh", &["-c".to_string(), script], false, Some(&slot), None, &tx);
 
         assert!(one.lines.iter().any(|l| l.contains("got:first")), "{:?}", one.lines);
         assert!(
@@ -673,7 +637,7 @@ mod interactive_tests {
 
         // Prompt on stdout, then chatter on stderr, then wait for an answer —
         // exactly pacman's shape.
-        let result = run_inner(
+        let result = run_tracked(
             "sh",
             &[
                 "-c".to_string(),
@@ -682,6 +646,7 @@ mod interactive_tests {
             ],
             false,
             Some(&slot),
+            None,
             &tx,
         );
         assert!(result.success);
@@ -744,10 +709,11 @@ mod interactive_tests {
     #[test]
     fn complete_lines_still_arrive_as_lines() {
         let (tx, rx) = std::sync::mpsc::channel();
-        let result = run_inner(
+        let result = run_tracked(
             "sh",
             &["-c".to_string(), "echo one; echo two".to_string()],
             false,
+            None,
             None,
             &tx,
         );

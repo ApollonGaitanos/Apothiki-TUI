@@ -177,18 +177,6 @@ pub fn cached_package(name: &str, version: &str) -> Option<PathBuf> {
     None
 }
 
-/// Whether every package in an entry can be restored from cache.
-///
-/// Checked *before* offering undo: promising a restore and then failing partway
-/// through is worse than saying up front that it is unavailable.
-pub fn can_undo(entry: &Entry) -> bool {
-    !entry.packages.is_empty()
-        && entry
-            .packages
-            .iter()
-            .all(|(n, v)| cached_package(n, v).is_some())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,12 +255,5 @@ mod tests {
         assert!(parse_line("").is_none());
         assert!(parse_line("{not json").is_none());
         assert!(parse_line("{\"timestamp\":1}").is_none());
-    }
-
-    #[test]
-    fn an_empty_entry_is_never_undoable() {
-        let mut e = entry();
-        e.packages.clear();
-        assert!(!can_undo(&e));
     }
 }

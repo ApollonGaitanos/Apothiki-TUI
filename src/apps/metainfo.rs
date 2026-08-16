@@ -39,6 +39,10 @@ impl ComponentKind {
     }
 }
 
+// Mirrors the on-disk record rather than only the parts currently consumed.
+// Dropping a field would mean the parser silently discards it, and the next
+// reader of this struct would have no way to tell that an AppStream component carries it at all.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct Component {
     /// Reverse-DNS identity, e.g. `org.gnome.Meld`. Legacy files use the

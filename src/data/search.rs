@@ -40,8 +40,6 @@ pub struct Hit {
     /// No maintainer. Nobody is updating the packaging or fixing it when it
     /// stops building.
     pub orphaned: bool,
-    score: u32,
-    tier: Tier,
 }
 
 /// Match quality, in the order a human expects to see it.
@@ -241,8 +239,6 @@ impl Searcher {
                         votes: 0,
                         out_of_date: false,
                         orphaned: false,
-                        score: c.score,
-                        tier: c.tier,
                     }
                 }),
                 Source::Aur(i) => aur.map(|a| {
@@ -257,8 +253,6 @@ impl Searcher {
                         votes: p.votes,
                         out_of_date: p.out_of_date.is_some(),
                         orphaned: p.is_orphaned(),
-                        score: c.score,
-                        tier: c.tier,
                     }
                 }),
             })

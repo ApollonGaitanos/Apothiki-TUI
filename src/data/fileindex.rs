@@ -195,6 +195,9 @@ impl FileIndex {
         self.entries.len()
     }
 
+    // Required by clippy alongside `len`, which is why it exists at all;
+    // nothing calls it today.
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
