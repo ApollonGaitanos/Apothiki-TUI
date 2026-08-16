@@ -392,7 +392,8 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
                 return;
             }
             if let Some(plan) = d.job.as_update() {
-                draw_update_confirm(f, popup, plan, d.snapshot, d.interactive);
+                let helper = crate::ops::find_aur_helper();
+                draw_update_confirm(f, popup, plan, d.snapshot, d.interactive, helper.as_deref());
                 return;
             }
             if let Some(r) = d.job.as_flatpak() {
@@ -937,6 +938,7 @@ fn draw_update_confirm(
     plan: &crate::ops::update::UpdatePlan,
     snapshot: bool,
     interactive: bool,
+    helper: Option<&str>,
 ) {
     let mut lines: Vec<Line> = vec![Line::styled(
         format!("{} available", plural(plan.total(), "update")),
@@ -1027,6 +1029,11 @@ fn draw_update_confirm(
             Style::default().fg(WARN()),
         ));
     }
+    // Both commands, because both run. An upgrade that says `sudo pacman -Syu`
+    // and then quietly also runs an AUR helper is asking for consent to one
+    // thing and doing two. The helper deliberately has no `sudo`: it builds
+    // packages, makepkg refuses to run as root, and the helper escalates for
+    // the install step itself.
     lines.push(Line::styled(
         format!(
             "$ sudo pacman {}",
@@ -1034,6 +1041,16 @@ fn draw_update_confirm(
         ),
         Style::default().fg(DIM()),
     ));
+    if !plan.aur.is_empty() {
+        lines.push(Line::styled(
+            format!(
+                "$ {} {}    (no sudo — it builds as you)",
+                helper.unwrap_or("paru"),
+                crate::ops::update::UpdatePlan::aur_upgrade_args(!interactive).join(" ")
+            ),
+            Style::default().fg(DIM()),
+        ));
+    }
     lines.push(Line::raw(""));
     lines.push(key_bar(
         &[
@@ -2109,6 +2126,61 @@ fn format_date(ts: i64) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_update_dialog_discloses_both_commands() {
+        use crate::ops::update::{Kind, Update, UpdatePlan, UpdateSource};
+        use ratatui::{backend::TestBackend, Terminal};
+
+        fn upd(name: &str, source: UpdateSource) -> Update {
+            Update {
+                name: name.into(),
+                installed: "1-1".into(),
+                available: "2-1".into(),
+                source,
+                kind: Kind::Tool,
+                display_name: None,
+            }
+        }
+        fn screen(plan: &UpdatePlan) -> String {
+            let mut t = Terminal::new(TestBackend::new(100, 40)).unwrap();
+            t.draw(|f| {
+                let area = f.area();
+                draw_update_confirm(f, area, plan, false, true, Some("paru"));
+            })
+            .unwrap();
+            t.backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|c| c.symbol())
+                .collect()
+        }
+
+        // An upgrade that says `sudo pacman -Syu` and then also runs an AUR
+        // helper is asking consent for one thing and doing two. Both commands
+        // have to be on screen before the user presses Enter.
+        let mixed = UpdatePlan {
+            repo: vec![upd("dkms", UpdateSource::Repo)],
+            aur: vec![upd("unityhub", UpdateSource::Aur)],
+        };
+        let out = screen(&mixed);
+        assert!(out.contains("sudo pacman -Syu"), "missing the repo command:\n{out}");
+        assert!(out.contains("paru -Sua"), "missing the AUR command:\n{out}");
+        assert!(
+            out.contains("no sudo"),
+            "the helper must be shown running unprivileged:\n{out}"
+        );
+
+        // With nothing from the AUR, naming the helper would be a lie.
+        let repo_only = UpdatePlan {
+            repo: vec![upd("dkms", UpdateSource::Repo)],
+            aur: vec![],
+        };
+        let out = screen(&repo_only);
+        assert!(out.contains("sudo pacman -Syu"));
+        assert!(!out.contains("paru -Sua"), "named a helper that will not run:\n{out}");
+    }
     use super::*;
 
     #[test]
