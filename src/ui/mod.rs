@@ -1,9 +1,14 @@
 //! The TUI: state, event handling, and the four M1 views.
 //!
-//! Bindings are CUA (spec §8, decided): arrows and Tab to move, F-keys to switch
-//! view, Ctrl+F to search, F1 for help, Esc to back out, Ctrl+Q to quit. No
-//! modal `hjkl` navigation — the audience is a user who does not want to learn
-//! a text editor to see what is installed.
+//! Bindings are CUA (spec §8, decided): arrows to move, Tab between views,
+//! `1`-`5` to jump to one, `f` to search, `q` to quit, F1 for help, Esc to back
+//! out. No modal `hjkl` navigation — the audience is a user who does not want
+//! to learn a text editor to see what is installed.
+//!
+//! Plain letters are free for bindings because typing does not filter: only the
+//! search view captures keystrokes, and Escape releases it. Ctrl+F and Ctrl+Q
+//! remain as aliases, since they are the only forms that work while a text
+//! field has focus.
 //!
 //! The key hint bar is always visible. Discoverability *is* the noob protection
 //! the spec asks for; a hidden binding may as well not exist.
@@ -1154,7 +1159,9 @@ impl Ui {
         }
 
         match key.code {
-            KeyCode::Char('q') if ctrl => self.should_quit = true,
+            // Plain `q` quits. Ctrl+Q stays as an alias because it is the only
+            // one that works while a text field has focus.
+            KeyCode::Char('q' | 'Q') => self.should_quit = true,
             KeyCode::Char('c') if ctrl => self.should_quit = true,
             KeyCode::F(1) => self.show_help = true,
 
@@ -1173,7 +1180,8 @@ impl Ui {
 
             // Search is explicit now: typing no longer starts it, so the number
             // row stays available for view switching.
-            KeyCode::Char('f') if ctrl => {
+            // Plain `f` focuses the query. Ctrl+F remains an alias.
+            KeyCode::Char('f' | 'F') => {
                 self.searching = true;
                 // In the search view this resumes editing the existing query;
                 // elsewhere it starts a fresh filter.

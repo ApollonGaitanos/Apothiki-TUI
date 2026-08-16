@@ -1063,19 +1063,20 @@ fn draw_keybar(f: &mut Frame, area: Rect, ui: &Ui) {
         let mut h = vec![
             ("F1", "help"),
             ("1-5/Tab", "views"),
-            ("Ctrl+F", "filter"),
+            ("f", "filter"),
             ("→", "open"),
             ("←", "back"),
             ("Del", "remove"),
             ("Ctrl+Z", "undo"),
+            ("q", "quit"),
         ];
         if ui.view == View::Search {
             h = vec![
                 ("F1", "help"),
                 ("1-5/Tab", "views"),
-                ("Ctrl+F", "type"),
+                ("f", "type"),
                 ("→/Enter", "install"),
-                ("Ctrl+Q", "quit"),
+                ("q", "quit"),
             ];
         }
         if ui.view == View::Orphans {
@@ -1088,7 +1089,6 @@ fn draw_keybar(f: &mut Frame, area: Rect, ui: &Ui) {
                 },
             ));
         }
-        h.push(("Ctrl+Q", "quit"));
         h
     };
 
@@ -1132,7 +1132,7 @@ fn draw_help(f: &mut Frame, area: Rect, ui: &Ui) {
         Line::raw("1 2 3 4 5      Apps / Tools / Deps / Orphans / Search"),
         Line::raw("Tab / Shift+Tab  next / previous view"),
         Line::raw("↑ ↓ PgUp PgDn Home End   move"),
-        Line::raw("Ctrl+F         filter, or edit the search query"),
+        Line::raw("f              filter, or edit the search query"),
         Line::raw("Esc            leave the search field, then 1-5 work"),
         Line::raw("F5             refresh"),
         Line::raw("→ or Enter     open: list → relationships → package"),
@@ -1141,7 +1141,13 @@ fn draw_help(f: &mut Frame, area: Rect, ui: &Ui) {
         Line::raw("Ctrl+Z         undo the last removal (from package cache)"),
         Line::raw("c  (Orphans)   clean up all orphans"),
         Line::raw("Space (Orphans) toggle -Qdt / -Qdtt"),
-        Line::raw("Ctrl+Q         quit"),
+        Line::raw("q              quit"),
+        Line::raw(""),
+        Line::styled(
+            "Ctrl+F and Ctrl+Q also work, and are the only forms",
+            Style::default().fg(DIM),
+        ),
+        Line::styled("that reach you while typing.", Style::default().fg(DIM)),
         Line::raw(""),
         Line::styled(
             "Removals run through pacman itself, never by writing",
