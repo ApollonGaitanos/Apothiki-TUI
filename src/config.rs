@@ -18,7 +18,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::style::Color;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub apps: AppsConfig,
@@ -70,18 +70,6 @@ pub struct ThemeConfig {
     pub warn: String,
     pub danger: String,
     pub ok: String,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Config {
-            apps: AppsConfig::default(),
-            safety: SafetyConfig::default(),
-            aur: AurConfig::default(),
-            theme: ThemeConfig::default(),
-            keys: HashMap::new(),
-        }
-    }
 }
 
 impl Default for AppsConfig {
