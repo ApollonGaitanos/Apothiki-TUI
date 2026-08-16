@@ -58,10 +58,15 @@ fn OK() -> Color {
 /// undermines the care the rest of the dialog is trying to convey.
 fn plural(n: usize, singular: &str) -> String {
     if n == 1 {
-        format!("{n} {singular}")
-    } else {
-        format!("{n} {singular}s")
+        return format!("{n} {singular}");
     }
+    // English plurals are not uniformly "+s", and "1377 dependencys" in a
+    // border undercuts every careful sentence elsewhere in the program.
+    let plural = match singular.rsplit_once('y') {
+        Some((stem, "")) if !stem.ends_with(['a', 'e', 'i', 'o', 'u']) => format!("{stem}ies"),
+        _ => format!("{singular}s"),
+    };
+    format!("{n} {plural}")
 }
 
 /// A framed pane in the shared style.
@@ -1996,6 +2001,17 @@ fn format_date(ts: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plurals_are_not_naive() {
+        assert_eq!(plural(1, "package"), "1 package");
+        assert_eq!(plural(2, "package"), "2 packages");
+        assert_eq!(plural(1, "dependency"), "1 dependency");
+        assert_eq!(plural(1377, "dependency"), "1377 dependencies");
+        assert_eq!(plural(0, "orphan"), "0 orphans");
+        // A vowel before the y keeps the simple form.
+        assert_eq!(plural(3, "day"), "3 days");
+    }
 
     #[test]
     fn sizes_are_human_readable() {

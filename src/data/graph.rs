@@ -289,10 +289,6 @@ impl Graph {
         &self.optional_for[i as usize]
     }
 
-    /// Every installed package providing `name`, virtual names included.
-    pub fn providers_of(&self, name: &str) -> &[PkgIdx] {
-        self.providers.get(name).map(|v| v.as_slice()).unwrap_or(&[])
-    }
 
     /// The full transitive closure of what `roots` depend on.
     pub fn closure(&self, roots: impl IntoIterator<Item = PkgIdx>) -> HashSet<PkgIdx> {

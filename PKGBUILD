@@ -4,7 +4,12 @@ pkgver=0.1.0
 pkgrel=1
 pkgdesc="Application-centric package explorer for Arch Linux"
 arch=('x86_64')
+# TODO: point this at the real repository before publishing. The source= line
+# below cannot resolve until this exists.
 url="https://github.com/ApollonG/apothiki"
+# TODO: confirm. Nothing in the tree states a licence yet, and this line is a
+# placeholder rather than a decision — add a LICENSE file to match whatever you
+# choose, or change both together.
 license=('MIT')
 # pacman is a runtime dependency in the literal sense: every mutation shells out
 # to it, and the read-only oracles the tool checks itself against are its output.
@@ -21,6 +26,9 @@ optdepends=(
   'archlinux-appstream-data: richer descriptions and icons for uninstalled packages'
 )
 source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
+# SKIP is only acceptable while the tag does not exist. Replace with the real
+# checksum before this is published anywhere: an unverified source in a PKGBUILD
+# is exactly the hazard this program warns users about in its own AUR dialog.
 sha256sums=('SKIP')
 
 prepare() {
@@ -48,5 +56,7 @@ package() {
   cd "$pkgname-$pkgver"
   install -Dm0755 "target/release/apo" "$pkgdir/usr/bin/apo"
   install -Dm0644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  # Ships only if one exists; see the licence note above.
+  [ -f LICENSE ] && install -Dm0644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   install -Dm0644 APOTHIKI_SPEC.md "$pkgdir/usr/share/doc/$pkgname/APOTHIKI_SPEC.md"
 }

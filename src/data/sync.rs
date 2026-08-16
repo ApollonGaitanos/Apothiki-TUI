@@ -164,8 +164,9 @@ impl SyncDb {
 pub enum Compression {
     Gzip,
     Zstd,
-    /// A bare tar, which pacman also accepts.
-    None,
+    /// Anything else. pacman also accepts an uncompressed tar, but its magic
+    /// lives at offset 257 and cannot be seen in the four bytes sniffed here;
+    /// no repository ships one, so it is reported rather than guessed at.
     Unknown([u8; 4]),
 }
 
@@ -173,8 +174,6 @@ pub fn sniff(magic: &[u8]) -> Compression {
     match magic {
         [0x1f, 0x8b, ..] => Compression::Gzip,
         [0x28, 0xb5, 0x2f, 0xfd, ..] => Compression::Zstd,
-        // A tar header has "ustar" at offset 257; anything else unrecognised is
-        // reported rather than guessed at.
         _ => {
             let mut m = [0u8; 4];
             for (i, b) in magic.iter().take(4).enumerate() {
@@ -194,7 +193,6 @@ fn open_decompressed(path: &Path) -> anyhow::Result<Box<dyn Read>> {
     match sniff(&magic[..n]) {
         Compression::Gzip => Ok(Box::new(flate2::read::GzDecoder::new(file))),
         Compression::Zstd => Ok(Box::new(zstd::stream::read::Decoder::new(file)?)),
-        Compression::None => Ok(Box::new(file)),
         Compression::Unknown(m) => Err(anyhow::anyhow!(
             "unrecognised compression (magic {m:02x?}); expected gzip or zstd"
         )),

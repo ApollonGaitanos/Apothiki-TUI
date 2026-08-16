@@ -39,9 +39,6 @@ impl RestorePlan {
         !self.available.is_empty() && self.missing.is_empty()
     }
 
-    pub fn package_names(&self) -> Vec<String> {
-        self.available.iter().map(|(n, _, _)| n.clone()).collect()
-    }
 
     /// `pacman -U` arguments: explicit file paths, so nothing is fetched.
     pub fn args(&self) -> Vec<String> {

@@ -315,13 +315,6 @@ struct Candidate {
 }
 
 impl Hit {
-    fn origin_rank(&self) -> u8 {
-        match self.origin {
-            Origin::Repo => 0,
-            Origin::Aur => 1,
-        }
-    }
-
     /// Short label for the source column.
     pub fn source_label(&self) -> String {
         match self.origin {
