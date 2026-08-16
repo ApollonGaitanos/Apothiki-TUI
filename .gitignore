@@ -18,3 +18,8 @@
 # Bug-report screenshots of a real desktop: app lists, Steam library, home
 # paths. Useful while debugging, not something to publish.
 /screenshots/
+
+# A clone of this repository made inside itself, which `makepkg -si` from the
+# README's clone instructions leaves behind. git add -A will otherwise commit
+# it as a gitlink.
+/Apothiki-TUI/
