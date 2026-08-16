@@ -13,6 +13,7 @@ use crossterm::event::{
     PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
+use crossterm::style::{Attribute, ResetColor, SetAttribute};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -26,6 +27,7 @@ pub fn restore() {
     let mut out = io::stdout();
     // Popping the enhancement flags is harmless if they were never pushed.
     let _ = execute!(out, PopKeyboardEnhancementFlags);
+    reset_style(&mut out);
     let _ = execute!(out, DisableMouseCapture, LeaveAlternateScreen);
     let _ = disable_raw_mode();
 }
@@ -56,7 +58,24 @@ pub fn suspended<T>(f: impl FnOnce() -> T) -> T {
     // that case anyway.
     let _ = enable_raw_mode();
     let _ = execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture);
+    // The child's colours are still in effect, and the caller clears the screen
+    // next. Erasing is *background-colour sensitive*: `ESC[2J` fills with
+    // whatever background is currently set, so an editor that exits without
+    // resetting leaves the whole screen painted its colour. Ratatui then
+    // diffs the new frame against an empty buffer, so every cell that stays
+    // blank is considered unchanged and never repainted — the stale colour
+    // survives indefinitely, retreating only where text happens to land. That
+    // is the black smear behind the panes. Reset before anyone erases.
+    reset_style(&mut io::stdout());
     result
+}
+
+/// Clears colour and attribute state.
+///
+/// Generic over the writer purely so the emitted sequence can be asserted in a
+/// test — the bug it prevents is invisible in any other way.
+fn reset_style(out: &mut impl io::Write) {
+    let _ = execute!(out, ResetColor, SetAttribute(Attribute::Reset));
 }
 
 /// Enters the alternate screen and raw mode.
@@ -87,4 +106,25 @@ pub fn init() -> anyhow::Result<(Tui, Guard)> {
 
     let terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     Ok((terminal, Guard { enhanced_keys }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_style_reset_actually_emits_a_reset() {
+        // Guards the fix for the smear: after an external editor exits, its
+        // colours are still set, and `ESC[2J` erases to the *current*
+        // background. Ratatui then diffs against an empty buffer, so blank
+        // cells count as unchanged and never get repainted — the wrong colour
+        // stays until text happens to cover it. One reproduction left 206
+        // black cells behind on a 170x41 screen.
+        let mut buf: Vec<u8> = Vec::new();
+        reset_style(&mut buf);
+        assert!(
+            String::from_utf8(buf).unwrap().contains("\x1b[0m"),
+            "reset_style must emit SGR 0 before anything erases the screen"
+        );
+    }
 }
