@@ -89,28 +89,42 @@ than an error.
 
 ## Installing
 
-Build and install the package:
+Tracking git, which rebuilds from whatever is on `main`:
 
 ```sh
-git clone https://github.com/ApollonGaitanos/Apothiki-TUI.git
-cd Apothiki-TUI/packaging && makepkg -si
+git clone https://github.com/ApollonGaitanos/Apothiki-TUI.git ~/.local/src/apothiki && cd ~/.local/src/apothiki/packaging/apothiki-git && makepkg -si
 ```
 
-Once it is on the AUR:
+To update, the same directory, one line — the PKGBUILD's source is the git
+repository, so `makepkg` fetches new commits itself and rebuilds only when
+there are any:
 
 ```sh
-paru -S apothiki        # or: yay -S apothiki
+cd ~/.local/src/apothiki/packaging/apothiki-git && makepkg -si
 ```
 
-Or just the binary, no package manager involved:
+`pacman -Q apothiki-git` then reports how far past the last release you are:
+`0.1.0.r6.gec8dd44` is six commits after `v0.1.0`.
+
+Once the packages are on the AUR, both become one word:
+
+```sh
+paru -S apothiki-git      # tracks git; `paru -Sua` updates it
+paru -S apothiki          # fixed, checksummed releases only
+```
+
+Installing the released version instead, from a checkout:
+
+```sh
+cd packaging && makepkg -si
+```
+
+Or just the binary, with no package manager involved:
 
 ```sh
 cargo build --release
 install -Dm755 target/release/apo ~/.local/bin/apo
 ```
-
-`~/.local/bin` is already on `PATH` on most Arch setups. Nothing else needs
-installing — configuration and caches are created on first use.
 
 Publishing a release is documented in [packaging/README.md](packaging/README.md).
 

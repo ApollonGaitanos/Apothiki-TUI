@@ -1,0 +1,76 @@
+# Maintainer: Apollon Gaitanos <apollon.gaitanos@gmail.com>
+#
+# Tracks the git branch rather than a release tag. Rebuilding picks up whatever
+# is on main at that moment, so there is nothing to tag and no checksum to
+# refresh — the trade is that you get whatever is on main, tested or not.
+# For a fixed, checksummed release, use the `apothiki` package one directory up.
+pkgname=apothiki-git
+_repo=Apothiki-TUI
+# Replaced by pkgver() on every build; this value is only a placeholder for
+# people reading the file.
+pkgver=0.1.0.r6.gec8dd44
+pkgrel=1
+pkgdesc="Application-centric package explorer for Arch Linux (git)"
+arch=('x86_64')
+url="https://github.com/ApollonGaitanos/$_repo"
+license=('MIT')
+depends=('pacman' 'glibc' 'gcc-libs')
+makedepends=('cargo' 'git')
+# Same binary, same name: installing both would be a file conflict on
+# /usr/bin/apo, and pacman should say so rather than let one silently win.
+provides=("apothiki=$pkgver")
+conflicts=('apothiki')
+optdepends=(
+  'snapper: pre-transaction snapshots before removals'
+  'paru: installing and updating AUR packages'
+  'yay: alternative AUR helper'
+  'flatpak: managing Flatpak applications'
+  'archlinux-appstream-data: richer descriptions and icons for uninstalled packages'
+)
+# Not optional. makepkg ships `lto` on by default, which puts `-flto=auto` into
+# CFLAGS; ring's C and assembly sources then land in the archive as GCC GIMPLE
+# bytecode, which lld cannot read, and the link fails on every x25519 and
+# CRYPTO_memcmp symbol ureq needs for TLS. Cargo already does full LTO itself.
+options=(!lto)
+source=("$pkgname::git+$url.git")
+# 'SKIP' is correct here, unlike in a release PKGBUILD: a git source is pinned
+# by the ref it is cloned from, and there is no fixed tarball to checksum.
+sha256sums=('SKIP')
+
+# Version derived from the tag, so `pacman -Q` shows how far past a release you
+# are: 0.1.0.r7.g1a2b3c4 is seven commits after v0.1.0. An AUR helper compares
+# this against what is installed, which is what makes `-Sua` notice new commits.
+pkgver() {
+  cd "$srcdir/$pkgname"
+  git describe --long --tags --abbrev=7 2>/dev/null \
+    | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g' \
+    || printf "0.0.0.r%s.g%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+}
+
+prepare() {
+  cd "$srcdir/$pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$srcdir/$pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release --all-features
+}
+
+check() {
+  cd "$srcdir/$pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  # Touches no system state and needs no fixtures, so it is safe in a chroot.
+  cargo test --frozen --release
+}
+
+package() {
+  cd "$srcdir/$pkgname"
+  install -Dm0755 "target/release/apo" "$pkgdir/usr/bin/apo"
+  install -Dm0644 README.md "$pkgdir/usr/share/doc/apothiki/README.md"
+  install -Dm0644 LICENSE "$pkgdir/usr/share/licenses/apothiki/LICENSE"
+  install -Dm0644 APOTHIKI_SPEC.md "$pkgdir/usr/share/doc/apothiki/APOTHIKI_SPEC.md"
+}

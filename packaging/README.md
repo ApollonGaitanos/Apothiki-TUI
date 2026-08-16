@@ -1,6 +1,22 @@
 # Releasing apothiki
 
-Three separate things, in order. Each one can be checked before the next.
+Two packages live here:
+
+- `PKGBUILD` — **apothiki**, built from a release tag and checksummed. Needs
+  the tag-and-checksum dance below.
+- `apothiki-git/PKGBUILD` — **apothiki-git**, built from `main`. Nothing to
+  tag and no checksum to refresh, because a git source is pinned by the ref it
+  is cloned from. Publish it once and `paru -Sua` picks up every commit after
+  that; the trade is that users get whatever is on `main`, tested or not.
+
+They conflict on purpose: both install `/usr/bin/apo`, and pacman should say so
+rather than let one silently overwrite the other.
+
+Publish either with `./publish-aur.sh [dir]` — no argument for the release,
+`./publish-aur.sh apothiki-git` for the VCS package.
+
+The rest of this file covers the release package: three separate things, in
+order, each checkable before the next.
 
 1. **GitHub** holds the source and the tag.
 2. **The tag** is what the PKGBUILD downloads and checksums.

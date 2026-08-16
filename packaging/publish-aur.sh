@@ -14,9 +14,13 @@
 # half-finished clone is worse than not starting.
 set -euo pipefail
 
-pkgname=apothiki
+# Which package to publish. Defaults to the release PKGBUILD beside this
+# script; pass a directory for the others, e.g. ./publish-aur.sh apothiki-git.
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$here"
+cd "${1:-$here}"
+[ -f PKGBUILD ] || { echo "error: no PKGBUILD in $(pwd)" >&2; exit 1; }
+pkgname="$(makepkg --printsrcinfo | sed -n 's/^pkgbase = //p')"
+echo "==> publishing $pkgname from $(pwd)"
 
 if ! ssh -o BatchMode=yes -o ConnectTimeout=15 aur@aur.archlinux.org help >/dev/null 2>&1; then
   cat >&2 <<EOF
@@ -31,9 +35,10 @@ EOF
   exit 1
 fi
 
-# The checksum must describe a tag that actually exists, or every user who
-# installs this gets a source that cannot be verified.
-if grep -q "sha256sums=('SKIP')" PKGBUILD; then
+# A release PKGBUILD must checksum its tarball, or every user who installs it
+# gets a source that cannot be verified. A VCS package is the exception: a git
+# source is pinned by the ref it is cloned from and has no fixed tarball.
+if grep -q "sha256sums=('SKIP')" PKGBUILD && ! grep -q '^source=.*git+' PKGBUILD; then
   echo "error: PKGBUILD still has sha256sums=('SKIP'); run updpkgsums first" >&2
   exit 1
 fi

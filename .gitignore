@@ -3,11 +3,13 @@
 # makepkg's working directories. This is why the PKGBUILD lives in packaging/
 # rather than the repository root: makepkg uses ./src as its build directory and
 # `makepkg -C` removes it, which at the root would delete the Rust sources.
-/packaging/src/
-/packaging/pkg/
-/packaging/*.tar.gz
-/packaging/*.pkg.tar.zst
-/packaging/*.log
+/packaging/**/src/
+/packaging/**/pkg/
+/packaging/**/*.tar.gz
+/packaging/**/*.pkg.tar.zst
+/packaging/**/*.log
+# makepkg keeps its cached clone of a VCS source beside the PKGBUILD.
+/packaging/apothiki-git/apothiki-git/
 
 # Local development guidance for coding agents. Not part of the program, not
 # useful to anyone installing it, and not something to publish.
