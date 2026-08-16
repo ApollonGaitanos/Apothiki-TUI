@@ -31,10 +31,10 @@ optdepends=(
 # the release profile already does full LTO on the Rust side.
 options=(!lto)
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-# Replace with the real checksum once v0.1.0 is tagged. An unverified source in
-# a PKGBUILD is exactly the hazard this program warns about in its own AUR
-# dialog, so this should not survive the first release.
-sha256sums=('SKIP')
+# Verified against the published v0.1.0 tarball. Regenerate with `updpkgsums`
+# on every version bump: an unverified source in a PKGBUILD is exactly the
+# hazard this program warns about in its own AUR dialog.
+sha256sums=('4880baef229902e6384e9f23d987b25c07a95e3d353fd143e9eaf53c02038da7')
 
 prepare() {
   cd "$_repo-$pkgver"
