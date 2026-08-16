@@ -22,6 +22,7 @@ pub mod appimage;
 pub mod desktop;
 pub mod flatpak;
 pub mod icon;
+pub mod locations;
 pub mod metainfo;
 
 use std::collections::{BTreeMap, HashMap};

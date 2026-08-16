@@ -49,9 +49,73 @@ pub fn draw(f: &mut Frame, ui: &mut Ui) {
     if ui.show_help {
         draw_help(f, f.area(), ui);
     }
+    if ui.locations.is_some() {
+        draw_locations(f, f.area(), ui);
+    }
     if ui.dialog.is_some() {
         draw_removal(f, f.area(), ui);
     }
+}
+
+/// Where a package's files live (spec §14).
+///
+/// Facts and guesses are kept visually apart. What the package owns comes from
+/// pacman; what lives in the user's home is matched by name and could easily be
+/// wrong, so it is labelled rather than presented alongside as equal.
+fn draw_locations(f: &mut Frame, area: Rect, ui: &Ui) {
+    let Some((name, groups)) = &ui.locations else {
+        return;
+    };
+    let popup = centred(area, area.width.saturating_sub(8), area.height.saturating_sub(4));
+
+    let mut lines: Vec<Line> = Vec::new();
+    for group in groups {
+        lines.push(Line::styled(
+            group.title.to_string(),
+            Style::default().add_modifier(Modifier::BOLD).fg(ACCENT),
+        ));
+        lines.push(Line::styled(
+            group.explanation.to_string(),
+            Style::default().fg(DIM),
+        ));
+        for entry in &group.paths {
+            let mut spans = vec![Span::styled(
+                format!("  {}", entry.path),
+                Style::default().fg(if entry.guessed { WARN } else { Color::Reset }),
+            )];
+            if let Some(size) = entry.size {
+                spans.push(Span::styled(
+                    format!("  {}", human_size(size)),
+                    Style::default().fg(DIM),
+                ));
+            }
+            if entry.guessed {
+                spans.push(Span::styled("  (guess)", Style::default().fg(DIM)));
+            }
+            lines.push(Line::from(spans));
+        }
+        lines.push(Line::raw(""));
+    }
+
+    if groups.is_empty() {
+        lines.push(Line::styled(
+            "This package owns no files worth listing.",
+            Style::default().fg(DIM),
+        ));
+    }
+
+    f.render_widget(Clear, popup);
+    f.render_widget(
+        Paragraph::new(lines)
+            .scroll((ui.locations_scroll, 0))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(ACCENT))
+                    .title(format!(" files of {name} — ↑↓ scroll, any key to close ")),
+            ),
+        popup,
+    );
 }
 
 fn centred(area: Rect, w: u16, h: u16) -> Rect {
@@ -88,6 +152,10 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
             // modes, no cascade, no typed confirmation.
             if let Some(plan) = d.job.as_restore() {
                 draw_restore_confirm(f, popup, plan);
+                return;
+            }
+            if let Some(plan) = d.job.as_update() {
+                draw_update_confirm(f, popup, plan, d.snapshot);
                 return;
             }
             if let Some(request) = d.job.as_install() {
@@ -325,6 +393,93 @@ fn draw_pkgbuild(
     );
 }
 
+/// The update dialog.
+///
+/// Says plainly that the whole system is upgraded, not the one package the user
+/// was looking at. That is not a limitation to apologise for: upgrading a subset
+/// of a rolling release is what breaks it.
+fn draw_update_confirm(
+    f: &mut Frame,
+    popup: Rect,
+    plan: &crate::ops::update::UpdatePlan,
+    snapshot: bool,
+) {
+    let mut lines: Vec<Line> = vec![Line::styled(
+        format!("{} update(s) available", plan.total()),
+        Style::default().add_modifier(Modifier::BOLD).fg(ACCENT),
+    )];
+    lines.push(Line::raw(""));
+
+    if !plan.repo.is_empty() {
+        lines.push(Line::styled(
+            format!("Repository ({})", plan.repo.len()),
+            Style::default().fg(OK),
+        ));
+        for u in plan.repo.iter().take(8) {
+            lines.push(Line::raw(format!(
+                "  {}  {} → {}",
+                u.name, u.installed, u.available
+            )));
+        }
+        if plan.repo.len() > 8 {
+            lines.push(Line::styled(
+                format!("  … and {} more", plan.repo.len() - 8),
+                Style::default().fg(DIM),
+            ));
+        }
+    }
+    if !plan.aur.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(Line::styled(
+            format!("AUR ({}) — rebuilt from source", plan.aur.len()),
+            Style::default().fg(WARN),
+        ));
+        for u in plan.aur.iter().take(6) {
+            lines.push(Line::raw(format!(
+                "  {}  {} → {}",
+                u.name, u.installed, u.available
+            )));
+        }
+    }
+
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        "The whole system is upgraded together.",
+        Style::default().add_modifier(Modifier::BOLD),
+    ));
+    lines.push(Line::styled(
+        "Upgrading one package on its own is a partial upgrade: it links",
+        Style::default().fg(DIM),
+    ));
+    lines.push(Line::styled(
+        "against libraries the rest of the system does not have yet, and is",
+        Style::default().fg(DIM),
+    ));
+    lines.push(Line::styled(
+        "the most common way a rolling install gets broken.",
+        Style::default().fg(DIM),
+    ));
+
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        format!(
+            "[{}] snapper snapshot first  (Ctrl+S)",
+            if snapshot { "x" } else { " " }
+        ),
+        Style::default().fg(if snapshot { OK } else { DIM }),
+    ));
+    lines.push(Line::styled(
+        "$ sudo pacman -Syu".to_string(),
+        Style::default().fg(DIM),
+    ));
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        "Enter upgrade   Esc cancel".to_string(),
+        Style::default().fg(DIM),
+    ));
+    render_popup(f, popup, " update ", lines);
+}
+
 /// The install dialog.
 ///
 /// States the source plainly. The difference between a signed repository build
@@ -504,6 +659,21 @@ fn draw_tabs(f: &mut Frame, area: Rect, ui: &Ui) {
         .collect();
 
     let selected = View::ALL.iter().position(|v| *v == ui.view).unwrap_or(0);
+    if !ui.updates.is_empty() {
+        let label = format!(" {} updates (u) ", ui.updates.total());
+        let w = label.chars().count() as u16;
+        f.render_widget(
+            Paragraph::new(Line::styled(
+                label,
+                Style::default().fg(Color::Black).bg(OK),
+            )),
+            Rect {
+                x: area.x + area.width.saturating_sub(w + 14),
+                width: w.min(area.width),
+                ..area
+            },
+        );
+    }
     if ui.is_reloading() {
         // A refresh rescans the whole system; saying so beats a list that
         // appears frozen.
@@ -1068,6 +1238,7 @@ fn draw_keybar(f: &mut Frame, area: Rect, ui: &Ui) {
             ("←", "back"),
             ("Del", "remove"),
             ("Ctrl+Z", "undo"),
+            ("l", "files"),
             ("q", "quit"),
         ];
         if ui.view == View::Search {
@@ -1139,6 +1310,8 @@ fn draw_help(f: &mut Frame, area: Rect, ui: &Ui) {
         Line::raw("← or Backspace go back"),
         Line::raw("Del            remove the selected package"),
         Line::raw("Ctrl+Z         undo the last removal (from package cache)"),
+        Line::raw("l              where this package's files live"),
+        Line::raw("u              upgrade the system, when updates exist"),
         Line::raw("c  (Orphans)   clean up all orphans"),
         Line::raw("Space (Orphans) toggle -Qdt / -Qdtt"),
         Line::raw("q              quit"),

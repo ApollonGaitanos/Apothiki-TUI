@@ -67,6 +67,7 @@ pub enum Job {
     Remove(RemovalRequest),
     Restore(crate::ops::restore::RestorePlan),
     Install(crate::ops::InstallRequest),
+    Update(crate::ops::update::UpdatePlan),
 }
 
 impl Job {
@@ -91,6 +92,13 @@ impl Job {
     pub fn as_install(&self) -> Option<&crate::ops::InstallRequest> {
         match self {
             Job::Install(r) => Some(r),
+            _ => None,
+        }
+    }
+
+    pub fn as_update(&self) -> Option<&crate::ops::update::UpdatePlan> {
+        match self {
+            Job::Update(p) => Some(p),
             _ => None,
         }
     }
@@ -178,6 +186,7 @@ impl RemovalDialog {
             Job::Install(r) => {
                 r.source == crate::ops::InstallSource::Aur && r.helper.is_none()
             }
+            Job::Update(p) => p.is_empty(),
         }
     }
 
@@ -187,6 +196,26 @@ impl RemovalDialog {
             // Installing adds something; it does not destroy anything, so the
             // strongest confirmation is reserved for removal.
             _ => false,
+        }
+    }
+
+    /// Builds an update dialog. A snapshot is on by default: a system upgrade
+    /// touches more of the machine than any single removal.
+    pub fn update(plan: crate::ops::update::UpdatePlan) -> Self {
+        RemovalDialog {
+            snapshot: crate::ops::snapshot::is_available(),
+            job: Job::Update(plan),
+            stage: Stage::Confirm,
+            mode_index: 0,
+            typed: String::new(),
+            password: String::new(),
+            error: None,
+            output: Vec::new(),
+            receiver: None,
+            confirm_word: String::new(),
+            pkgbuild: None,
+            pkgbuild_scroll: 0,
+            pkgbuild_rx: None,
         }
     }
 
@@ -337,6 +366,94 @@ pub fn verify_against_pacman(
         ));
     }
     Ok(theirs)
+}
+
+/// Spawns a full system upgrade, then AUR upgrades if any.
+///
+/// Repository packages go first and as one transaction. Upgrading a subset is a
+/// partial upgrade, which on a rolling release leaves binaries linked against
+/// libraries that are no longer installed — so the plan is never narrowed, no
+/// matter which package the user was looking at when they pressed the key.
+pub fn spawn_update(
+    plan: crate::ops::update::UpdatePlan,
+    helper: Option<String>,
+    take_snapshot: bool,
+    tx: Sender<Output>,
+) {
+    use crate::ops::update::UpdatePlan;
+
+    std::thread::spawn(move || {
+        if dry_run_mode() {
+            let _ = tx.send(Output::Line("APOTHIKI_DRY_RUN is set — nothing will change".into()));
+            if take_snapshot {
+                let _ = tx.send(Output::Line("would take a snapper snapshot".into()));
+            }
+            let _ = tx.send(Output::Line(format!(
+                "would run: sudo pacman {}",
+                UpdatePlan::system_upgrade_args().join(" ")
+            )));
+            if !plan.aur.is_empty() {
+                let _ = tx.send(Output::Line(format!(
+                    "would then run: {} {}",
+                    helper.clone().unwrap_or_else(|| "paru".into()),
+                    UpdatePlan::aur_upgrade_args().join(" ")
+                )));
+            }
+            let _ = tx.send(Output::Finished { success: true, code: Some(0) });
+            return;
+        }
+
+        if take_snapshot {
+            if let Some(config) = snapshot::config_name() {
+                let args = snapshot::pre_snapshot_args(&config, "apothiki: system upgrade");
+                let _ = tx.send(Output::Line("taking snapshot…".into()));
+                if !exec::run_privileged("snapper", &args, &tx).success {
+                    let _ = tx.send(Output::Failed(
+                        "snapshot failed — upgrade aborted (uncheck the snapshot option to \
+                         proceed without one)"
+                            .into(),
+                    ));
+                    return;
+                }
+            }
+        }
+
+        let repo = exec::run_privileged("pacman", &UpdatePlan::system_upgrade_args(), &tx);
+        let mut success = repo.success;
+
+        // AUR rebuilds only after the repository upgrade succeeded: building
+        // against a half-upgraded system is exactly the failure the ordering
+        // exists to avoid.
+        if success && !plan.aur.is_empty() {
+            if let Some(h) = &helper {
+                let aur = exec::run_unprivileged(h, &UpdatePlan::aur_upgrade_args(), &tx);
+                success = aur.success;
+            } else {
+                let _ = tx.send(Output::Line(
+                    "no AUR helper found; AUR packages were not upgraded".into(),
+                ));
+            }
+        }
+
+        let _ = tx.send(Output::Finished { success, code: repo.code });
+
+        let entry = history::Entry {
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0),
+            operation: "-Syu".to_string(),
+            packages: plan
+                .repo
+                .iter()
+                .chain(plan.aur.iter())
+                .map(|u| (u.name.clone(), u.available.clone()))
+                .collect(),
+            success,
+            snapshot: None,
+        };
+        let _ = history::record(&entry);
+    });
 }
 
 /// Spawns an install on a background thread.

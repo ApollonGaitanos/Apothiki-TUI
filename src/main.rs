@@ -143,6 +143,32 @@ fn doctor() -> anyhow::Result<()> {
         ok(!state::is_db_locked())
     );
 
+    println!("\nupdates");
+    let repo = ops::update::repo_updates();
+    println!("  --   {} repository updates", repo.len());
+    match data::aur::AurIndex::load_cached() {
+        Some(aur) => {
+            let sync = SyncDb::load(SyncDb::DEFAULT_ROOT)?;
+            let db = LocalDb::load(LocalDb::DEFAULT_ROOT)?;
+            let foreign: Vec<String> = db
+                .packages
+                .iter()
+                .filter(|p| sync.is_foreign(&p.name))
+                .map(|p| p.name.clone())
+                .collect();
+            let aur_updates = ops::update::aur_updates(&db, &aur, &foreign);
+            println!(
+                "  --   {} AUR updates (of {} foreign packages)",
+                aur_updates.len(),
+                foreign.len()
+            );
+            for u in aur_updates.iter().take(5) {
+                println!("       {} {} -> {}", u.name, u.installed, u.available);
+            }
+        }
+        None => println!("  --   no AUR index cached"),
+    }
+
     println!("\nundo");
     match ops::restore::last_undoable() {
         Some(e) => {

@@ -191,6 +191,12 @@ pub struct Ui {
     searcher: crate::data::search::Searcher,
     /// Results for the current query, recomputed when it changes.
     pub results: Vec<crate::data::search::Hit>,
+    /// Available updates, detected in the background.
+    pub updates: crate::ops::update::UpdatePlan,
+    updates_rx: Option<std::sync::mpsc::Receiver<crate::ops::update::UpdatePlan>>,
+    /// File locations for the current selection, when the pane is open.
+    pub locations: Option<(String, Vec<crate::apps::locations::Group>)>,
+    pub locations_scroll: u16,
     /// In-flight background reload, if any.
     reload_rx: Option<std::sync::mpsc::Receiver<anyhow::Result<SystemState>>>,
     /// Decoded icon for the current selection, with the key it was built for.
@@ -271,6 +277,10 @@ impl Ui {
             aur_state: crate::data::aur::AurState::Absent,
             searcher: crate::data::search::Searcher::new(),
             results: Vec::new(),
+            updates: Default::default(),
+            updates_rx: None,
+            locations: None,
+            locations_scroll: 0,
             reload_rx: None,
             picker,
             icon: None,
@@ -772,6 +782,16 @@ impl Ui {
     fn start_removal(&mut self) {
         let Some(d) = &mut self.dialog else { return };
 
+        if let Some(plan) = d.job.as_update().cloned() {
+            let (tx, rx) = std::sync::mpsc::channel();
+            removal::spawn_update(plan, crate::ops::find_aur_helper(), d.snapshot, tx);
+            d.receiver = Some(rx);
+            d.stage = Stage::Running;
+            d.output.clear();
+            self.state.db_locked = false;
+            return;
+        }
+
         if let Some(request) = d.job.as_install().cloned() {
             let (tx, rx) = std::sync::mpsc::channel();
             removal::spawn_install(request, tx);
@@ -833,6 +853,16 @@ impl Ui {
         });
         self.sync_rx = Some(rx);
 
+        // Update detection asks pacman rather than reconstructing its answer.
+        let (utx, urx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = utx.send(crate::ops::update::UpdatePlan {
+                repo: crate::ops::update::repo_updates(),
+                aur: Vec::new(),
+            });
+        });
+        self.updates_rx = Some(urx);
+
         // A cached index is used immediately; a download only starts when there
         // is none or it has aged out. Search over repositories works either way,
         // so a cold start is degraded rather than blocked.
@@ -851,6 +881,50 @@ impl Ui {
                 self.aur_rx = Some(rx);
             }
         }
+    }
+
+    /// Compares installed foreign packages against the AUR index.
+    ///
+    /// Only runs once both are available, and only over packages no repository
+    /// carries — a handful, so the version comparisons are cheap.
+    fn detect_aur_updates(&mut self) {
+        let (Some(aur), Some(sync)) = (&self.aur, &self.sync) else {
+            return;
+        };
+        let foreign: Vec<String> = self
+            .state
+            .db
+            .packages
+            .iter()
+            .filter(|p| sync.is_foreign(&p.name))
+            .map(|p| p.name.clone())
+            .collect();
+        self.updates.aur = crate::ops::update::aur_updates(&self.state.db, aur, &foreign);
+    }
+
+    /// Opens the update dialog.
+    fn open_update(&mut self) {
+        if self.updates.is_empty() {
+            self.notice = Some("everything is up to date".into());
+            return;
+        }
+        self.dialog = Some(RemovalDialog::update(self.updates.clone()));
+    }
+
+    /// Opens the file-locations pane for the current selection.
+    fn toggle_locations(&mut self) {
+        if self.locations.is_some() {
+            self.locations = None;
+            return;
+        }
+        let Some(idx) = self.selected_package() else {
+            self.notice = Some("no package selected, so there are no files to show".into());
+            return;
+        };
+        let pkg = &self.state.db.packages[idx as usize];
+        let groups = crate::apps::locations::describe(&self.state.db, pkg);
+        self.locations = Some((pkg.name.clone(), groups));
+        self.locations_scroll = 0;
     }
 
     /// Re-runs the search for the current query.
@@ -975,6 +1049,9 @@ impl Ui {
             if let Ok(db) = rx.try_recv() {
                 self.sync = Some(db);
                 self.sync_rx = None;
+                // AUR update detection needs both this and the index, and they
+                // arrive in an order nobody controls — so every arrival retries.
+                self.detect_aur_updates();
                 if self.view == View::Search {
                     self.refresh_results();
                 }
@@ -986,6 +1063,7 @@ impl Ui {
                     self.aur = Some(index);
                     self.aur_state = crate::data::aur::AurState::Ready;
                     self.aur_rx = None;
+                    self.detect_aur_updates();
                     if self.view == View::Search {
                         self.refresh_results();
                     }
@@ -996,6 +1074,14 @@ impl Ui {
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => self.aur_rx = None,
+            }
+        }
+
+        if let Some(rx) = &self.updates_rx {
+            if let Ok(plan) = rx.try_recv() {
+                self.updates = plan;
+                self.updates_rx = None;
+                self.detect_aur_updates();
             }
         }
 
@@ -1158,6 +1244,20 @@ impl Ui {
             return;
         }
 
+        if self.locations.is_some() {
+            match key.code {
+                KeyCode::Down => self.locations_scroll = self.locations_scroll.saturating_add(1),
+                KeyCode::Up => self.locations_scroll = self.locations_scroll.saturating_sub(1),
+                KeyCode::PageDown => {
+                    self.locations_scroll = self.locations_scroll.saturating_add(10)
+                }
+                KeyCode::PageUp => self.locations_scroll = self.locations_scroll.saturating_sub(10),
+                KeyCode::Char('q') if !ctrl => self.should_quit = true,
+                _ => self.locations = None,
+            }
+            return;
+        }
+
         match key.code {
             // Plain `q` quits. Ctrl+Q stays as an alias because it is the only
             // one that works while a text field has focus.
@@ -1191,6 +1291,10 @@ impl Ui {
             }
 
             KeyCode::Delete => self.open_removal(),
+            // Where this package's files live (spec §14).
+            KeyCode::Char('l' | 'L') => self.toggle_locations(),
+            // Updates, if any.
+            KeyCode::Char('u' | 'U') => self.open_update(),
             // Undo the last removal, restoring from the package cache.
             KeyCode::Char('z') if ctrl => self.open_undo(),
             // Bulk orphan cleanup, offered only where it makes sense.

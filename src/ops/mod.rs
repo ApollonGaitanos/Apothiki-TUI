@@ -8,6 +8,7 @@ pub mod history;
 pub mod restore;
 pub mod safety;
 pub mod snapshot;
+pub mod update;
 
 use std::collections::HashSet;
 
