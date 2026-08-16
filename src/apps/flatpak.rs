@@ -24,6 +24,15 @@ pub struct FlatpakApp {
     pub size: String,
     /// Remote it came from, e.g. `flathub`.
     pub origin: String,
+    /// `system` or `user`. Decides whether removal needs privileges, so it is
+    /// worth the extra column.
+    pub installation: String,
+}
+
+impl FlatpakApp {
+    pub fn is_system(&self) -> bool {
+        self.installation != "user"
+    }
 }
 
 /// Lists installed Flatpak applications.
@@ -37,7 +46,7 @@ pub fn list() -> Vec<FlatpakApp> {
         .args([
             "list",
             "--app",
-            "--columns=application,name,size,origin",
+            "--columns=application,name,size,origin,installation",
         ])
         .output();
 
@@ -62,6 +71,10 @@ fn parse_line(line: &str) -> Option<FlatpakApp> {
         name: cols.next().unwrap_or("").trim().to_string(),
         size: cols.next().unwrap_or("").trim().to_string(),
         origin: cols.next().unwrap_or("").trim().to_string(),
+        // Absent means an older flatpak without the column; system is the
+        // safer assumption, since it only means asking for a password that
+        // turns out not to have been needed.
+        installation: cols.next().unwrap_or("system").trim().to_string(),
         id,
     })
 }
@@ -79,8 +92,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn installation_scope_is_read_and_defaults_to_system() {
+        let sys = parse_line("a.b.C\tC\t1 MB\tflathub\tsystem").unwrap();
+        assert!(sys.is_system());
+        let user = parse_line("a.b.C\tC\t1 MB\tflathub\tuser").unwrap();
+        assert!(!user.is_system());
+        // Older flatpak without the column: assume system, which at worst asks
+        // for a password that was not needed.
+        let old = parse_line("a.b.C\tC\t1 MB\tflathub").unwrap();
+        assert!(old.is_system());
+    }
+
+    #[test]
     fn parses_the_column_output() {
-        let a = parse_line("app.zen_browser.zen\tZen\t395,7 MB\tflathub").unwrap();
+        let a = parse_line("app.zen_browser.zen\tZen\t395,7 MB\tflathub\tsystem").unwrap();
         assert_eq!(a.id, "app.zen_browser.zen");
         assert_eq!(a.name, "Zen");
         // Localised decimal separator preserved verbatim rather than misparsed.
@@ -104,6 +129,7 @@ mod tests {
             name: "Gear Lever".into(),
             size: "22,2 MB".into(),
             origin: "flathub".into(),
+            installation: "system".into(),
         }];
         let map = by_desktop_id(&apps);
         assert!(map.contains_key("it.mijorus.gearlever.desktop"));

@@ -3,6 +3,7 @@
 //! **We never write to the pacman database.** Every mutation shells out to
 //! pacman itself. This module builds and checks plans; `exec` runs them.
 
+pub mod bundle;
 pub mod exec;
 pub mod history;
 pub mod restore;

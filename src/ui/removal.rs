@@ -70,6 +70,8 @@ pub enum Job {
     Update(crate::ops::update::UpdatePlan),
     /// One package only. Flagged as risky wherever it is shown.
     SingleUpdate(crate::ops::update::Update),
+    RemoveFlatpak(crate::ops::bundle::FlatpakRemoval),
+    RemoveAppImage(crate::ops::bundle::AppImageRemoval),
 }
 
 impl Job {
@@ -108,6 +110,27 @@ impl Job {
     pub fn as_single_update(&self) -> Option<&crate::ops::update::Update> {
         match self {
             Job::SingleUpdate(u) => Some(u),
+            _ => None,
+        }
+    }
+
+    pub fn as_flatpak(&self) -> Option<&crate::ops::bundle::FlatpakRemoval> {
+        match self {
+            Job::RemoveFlatpak(r) => Some(r),
+            _ => None,
+        }
+    }
+
+    pub fn as_appimage(&self) -> Option<&crate::ops::bundle::AppImageRemoval> {
+        match self {
+            Job::RemoveAppImage(r) => Some(r),
+            _ => None,
+        }
+    }
+
+    pub fn as_appimage_mut(&mut self) -> Option<&mut crate::ops::bundle::AppImageRemoval> {
+        match self {
+            Job::RemoveAppImage(r) => Some(r),
             _ => None,
         }
     }
@@ -197,6 +220,7 @@ impl RemovalDialog {
             }
             Job::Update(p) => p.is_empty(),
             Job::SingleUpdate(_) => false,
+            Job::RemoveFlatpak(_) | Job::RemoveAppImage(_) => false,
         }
     }
 
@@ -215,6 +239,36 @@ impl RemovalDialog {
         RemovalDialog {
             snapshot: crate::ops::snapshot::is_available(),
             job: Job::Update(plan),
+            stage: Stage::Confirm,
+            mode_index: 0,
+            typed: String::new(),
+            password: String::new(),
+            error: None,
+            output: Vec::new(),
+            receiver: None,
+            confirm_word: String::new(),
+            pkgbuild: None,
+            pkgbuild_scroll: 0,
+            pkgbuild_rx: None,
+        }
+    }
+
+    /// Builds a Flatpak removal dialog.
+    pub fn flatpak(removal: crate::ops::bundle::FlatpakRemoval) -> Self {
+        Self::bare(Job::RemoveFlatpak(removal))
+    }
+
+    /// Builds an AppImage removal dialog.
+    pub fn appimage(removal: crate::ops::bundle::AppImageRemoval) -> Self {
+        Self::bare(Job::RemoveAppImage(removal))
+    }
+
+    /// A dialog with no snapshot and no typed confirmation, for operations
+    /// outside pacman's world where neither applies.
+    fn bare(job: Job) -> Self {
+        RemovalDialog {
+            snapshot: false,
+            job,
             stage: Stage::Confirm,
             mode_index: 0,
             typed: String::new(),
@@ -395,6 +449,101 @@ pub fn verify_against_pacman(
         ));
     }
     Ok(theirs)
+}
+
+/// Spawns a Flatpak uninstall.
+///
+/// System installations go through sudo; user installations do not, because
+/// they need no privileges and prompting for a password nobody needs teaches
+/// people to type it without thinking.
+pub fn spawn_flatpak_removal(
+    removal: crate::ops::bundle::FlatpakRemoval,
+    tx: Sender<Output>,
+) {
+    std::thread::spawn(move || {
+        if dry_run_mode() {
+            let _ = tx.send(Output::Line("APOTHIKI_DRY_RUN is set — nothing will change".into()));
+            let _ = tx.send(Output::Line(format!("would run: {}", removal.command_line())));
+            let _ = tx.send(Output::Finished { success: true, code: Some(0) });
+            return;
+        }
+
+        let run = |args: &[String], tx: &Sender<Output>| {
+            if removal.needs_privileges() {
+                exec::run_privileged("flatpak", args, tx)
+            } else {
+                exec::run_unprivileged("flatpak", args, tx)
+            }
+        };
+
+        let result = run(&removal.args(), &tx);
+        let mut success = result.success;
+
+        // Runtimes are Flatpak's dependencies; clearing unused ones is the
+        // equivalent of -Rs and is where the space actually comes back.
+        if success && removal.remove_unused {
+            let _ = tx.send(Output::Line("removing unused runtimes…".into()));
+            success = run(&removal.unused_args(), &tx).success;
+        }
+
+        let _ = tx.send(Output::Finished { success, code: result.code });
+
+        let entry = history::Entry {
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0),
+            operation: "flatpak uninstall".to_string(),
+            packages: vec![(removal.id.clone(), String::new())],
+            success,
+            snapshot: None,
+        };
+        let _ = history::record(&entry);
+    });
+}
+
+/// Spawns an AppImage deletion.
+///
+/// The only operation that removes files directly rather than delegating, so
+/// every path is checked against the home-directory fence first and each
+/// outcome is reported individually.
+pub fn spawn_appimage_removal(
+    removal: crate::ops::bundle::AppImageRemoval,
+    tx: Sender<Output>,
+) {
+    std::thread::spawn(move || {
+        let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+            let _ = tx.send(Output::Failed("no home directory".into()));
+            return;
+        };
+
+        if dry_run_mode() {
+            let _ = tx.send(Output::Line("APOTHIKI_DRY_RUN is set — nothing will change".into()));
+            for t in removal.targets() {
+                let _ = tx.send(Output::Line(format!("would remove {}", t.display())));
+            }
+            let _ = tx.send(Output::Finished { success: true, code: Some(0) });
+            return;
+        }
+
+        let (success, log) = crate::ops::bundle::delete_appimage(&removal, &home);
+        for line in log {
+            let _ = tx.send(Output::Line(line));
+        }
+        let _ = tx.send(Output::Finished { success, code: None });
+
+        let entry = history::Entry {
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0),
+            operation: "appimage delete".to_string(),
+            packages: vec![(removal.name.clone(), String::new())],
+            success,
+            snapshot: None,
+        };
+        let _ = history::record(&entry);
+    });
 }
 
 /// Spawns a single-package upgrade.

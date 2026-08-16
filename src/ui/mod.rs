@@ -622,6 +622,16 @@ impl Ui {
 
     /// Opens the removal dialog for the current selection.
     fn open_removal(&mut self) {
+        // Flatpaks and AppImages are removed by their own machinery, not
+        // pacman's, so they branch before the package lookup that would fail.
+        if let Some(Item::App(i)) = self.current() {
+            match self.state.catalog.apps[i].source {
+                Source::Flatpak => return self.open_flatpak_removal(i),
+                Source::AppImage => return self.open_appimage_removal(i),
+                _ => {}
+            }
+        }
+
         let Some(pkg) = self.selected_package() else {
             // No pacman package backs this. Saying so is essential: a Delete
             // that silently does nothing is indistinguishable from the tool
@@ -651,6 +661,91 @@ impl Ui {
         );
         let word = self.state.graph.name(pkg).to_string();
         self.dialog = Some(RemovalDialog::new(request, word));
+    }
+
+    /// Opens the Flatpak removal dialog.
+    fn open_flatpak_removal(&mut self, index: usize) {
+        let app = &self.state.catalog.apps[index];
+        // The AppStream id is the Flatpak application id for exported entries.
+        let Some(id) = app
+            .evidence
+            .iter()
+            .find_map(|e| match e {
+                crate::apps::Evidence::Flatpak { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .or_else(|| app.desktop_id.as_ref()?.strip_suffix(".desktop").map(String::from))
+        else {
+            self.notice = Some("could not determine the Flatpak id".into());
+            return;
+        };
+
+        let system = crate::apps::flatpak::list()
+            .into_iter()
+            .find(|f| f.id == id)
+            .map(|f| f.is_system())
+            .unwrap_or(true);
+
+        self.dialog = Some(RemovalDialog::flatpak(crate::ops::bundle::FlatpakRemoval {
+            id,
+            name: app.name.clone(),
+            system,
+            remove_unused: true,
+        }));
+    }
+
+    /// Opens the AppImage removal dialog.
+    fn open_appimage_removal(&mut self, index: usize) {
+        let app = &self.state.catalog.apps[index];
+        let Some(bundle) = app.evidence.iter().find_map(|e| match e {
+            crate::apps::Evidence::AppImageFile(p) => Some(std::path::PathBuf::from(p)),
+            _ => None,
+        }) else {
+            self.notice = Some("could not locate the AppImage file".into());
+            return;
+        };
+
+        // The desktop entry and its icon are integration leftovers; both are
+        // derived from the entry we already parsed rather than guessed.
+        let desktop_entry = app.desktop_id.as_ref().and_then(|id| {
+            let p = std::env::var_os("HOME").map(std::path::PathBuf::from)?;
+            let path = p.join(".local/share/applications").join(id);
+            path.exists().then_some(path)
+        });
+        let icon = app
+            .icon
+            .as_ref()
+            .and_then(|i| crate::apps::icon::find(i))
+            .filter(|p| {
+                // Only an icon that lives beside the bundle is ours to delete;
+                // a themed system icon belongs to something else.
+                std::env::var_os("HOME")
+                    .map(std::path::PathBuf::from)
+                    .is_some_and(|h| p.starts_with(&h))
+            });
+
+        let user_data: Vec<std::path::PathBuf> = crate::apps::locations::user_paths(
+            &bundle
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        )
+        .into_iter()
+        .filter(|e| e.exists)
+        .map(|e| std::path::PathBuf::from(e.path))
+        .collect();
+
+        self.dialog = Some(RemovalDialog::appimage(crate::ops::bundle::AppImageRemoval {
+            name: app.name.clone(),
+            bundle,
+            desktop_entry,
+            icon,
+            user_data,
+            remove_desktop: true,
+            remove_icon: true,
+            // Off by default: the one part we are not certain about.
+            remove_data: false,
+        }));
     }
 
     /// Opens the install dialog for the selected search result.
@@ -808,6 +903,24 @@ impl Ui {
 
     fn start_removal(&mut self) {
         let Some(d) = &mut self.dialog else { return };
+
+        if let Some(r) = d.job.as_flatpak().cloned() {
+            let (tx, rx) = std::sync::mpsc::channel();
+            removal::spawn_flatpak_removal(r, tx);
+            d.receiver = Some(rx);
+            d.stage = Stage::Running;
+            d.output.clear();
+            return;
+        }
+
+        if let Some(r) = d.job.as_appimage().cloned() {
+            let (tx, rx) = std::sync::mpsc::channel();
+            removal::spawn_appimage_removal(r, tx);
+            d.receiver = Some(rx);
+            d.stage = Stage::Running;
+            d.output.clear();
+            return;
+        }
 
         if let Some(u) = d.job.as_single_update().cloned() {
             let (tx, rx) = std::sync::mpsc::channel();
@@ -1258,6 +1371,22 @@ impl Ui {
                     self.refresh_dialog_request();
                 }
                 KeyCode::Char('s') if ctrl => d.snapshot = !d.snapshot,
+                // AppImage components are individually optional.
+                KeyCode::Char('1') if d.job.as_appimage().is_some() => {
+                    if let Some(a) = d.job.as_appimage_mut() {
+                        a.remove_desktop = !a.remove_desktop;
+                    }
+                }
+                KeyCode::Char('2') if d.job.as_appimage().is_some() => {
+                    if let Some(a) = d.job.as_appimage_mut() {
+                        a.remove_icon = !a.remove_icon;
+                    }
+                }
+                KeyCode::Char('3') if d.job.as_appimage().is_some() => {
+                    if let Some(a) = d.job.as_appimage_mut() {
+                        a.remove_data = !a.remove_data;
+                    }
+                }
                 KeyCode::Enter | KeyCode::Right => self.confirm_removal(),
                 _ => {}
             },
@@ -1418,8 +1547,12 @@ impl Ui {
             KeyCode::Delete => self.open_removal(),
             // Where this package's files live (spec §14).
             KeyCode::Char('l' | 'L') => self.toggle_locations(),
-            // Updates, if any.
-            KeyCode::Char('u' | 'U') => self.open_update(),
+            // Upgrading is reachable only from the view that shows what it
+            // would do. The badge in the tab bar is how you learn it exists.
+            KeyCode::Char('u' | 'U') if self.view == View::Updates => self.open_update(),
+            KeyCode::Char('u' | 'U') => {
+                self.switch_view(View::Updates);
+            }
             // Undo the last removal, restoring from the package cache.
             KeyCode::Char('z') if ctrl => self.open_undo(),
             // Bulk orphan cleanup, offered only where it makes sense.

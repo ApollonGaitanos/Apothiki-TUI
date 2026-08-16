@@ -178,6 +178,14 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
                 draw_update_confirm(f, popup, plan, d.snapshot);
                 return;
             }
+            if let Some(r) = d.job.as_flatpak() {
+                draw_flatpak_confirm(f, popup, r);
+                return;
+            }
+            if let Some(r) = d.job.as_appimage() {
+                draw_appimage_confirm(f, popup, r);
+                return;
+            }
             if let Some(u) = d.job.as_single_update() {
                 draw_single_update_confirm(f, popup, u, d.snapshot);
                 return;
@@ -415,6 +423,121 @@ fn draw_pkgbuild(
         ),
         popup,
     );
+}
+
+/// Removing a Flatpak.
+fn draw_flatpak_confirm(f: &mut Frame, popup: Rect, r: &crate::ops::bundle::FlatpakRemoval) {
+    let mut lines: Vec<Line> = vec![Line::styled(
+        r.name.clone(),
+        Style::default().add_modifier(Modifier::BOLD).fg(ACCENT),
+    )];
+    lines.push(Line::raw(""));
+    lines.push(field("flatpak id", &r.id));
+    lines.push(field(
+        "installed for",
+        if r.system {
+            "everyone (needs your password)"
+        } else {
+            "you only"
+        },
+    ));
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        format!(
+            "[{}] also remove unused runtimes",
+            if r.remove_unused { "x" } else { " " }
+        ),
+        Style::default().fg(if r.remove_unused { OK } else { DIM }),
+    ));
+    lines.push(Line::styled(
+        "Runtimes are Flatpak's shared dependencies — this is where the",
+        Style::default().fg(DIM),
+    ));
+    lines.push(Line::styled(
+        "space actually comes back.",
+        Style::default().fg(DIM),
+    ));
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        format!("$ {}", r.command_line()),
+        Style::default().fg(DIM),
+    ));
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        "Enter remove   Esc cancel".to_string(),
+        Style::default().fg(DIM),
+    ));
+    render_popup(f, popup, " remove flatpak ", lines);
+}
+
+/// Removing an AppImage, component by component.
+fn draw_appimage_confirm(f: &mut Frame, popup: Rect, r: &crate::ops::bundle::AppImageRemoval) {
+    let mut lines: Vec<Line> = vec![Line::styled(
+        r.name.clone(),
+        Style::default().add_modifier(Modifier::BOLD).fg(ACCENT),
+    )];
+    lines.push(Line::styled(
+        "A self-contained bundle — nothing else depends on it.",
+        Style::default().fg(DIM),
+    ));
+    lines.push(Line::raw(""));
+
+    lines.push(Line::styled(
+        format!("[x] {}", r.bundle.display()),
+        Style::default().fg(OK),
+    ));
+    lines.push(Line::styled(
+        "    the application itself",
+        Style::default().fg(DIM),
+    ));
+
+    let mut row = |on: bool, key: char, path: Option<&std::path::PathBuf>, what: &str| {
+        if let Some(p) = path {
+            lines.push(Line::styled(
+                format!("[{}] {}   ({key})", if on { "x" } else { " " }, p.display()),
+                Style::default().fg(if on { OK } else { DIM }),
+            ));
+            lines.push(Line::styled(format!("    {what}"), Style::default().fg(DIM)));
+        }
+    };
+    row(r.remove_desktop, '1', r.desktop_entry.as_ref(), "its launcher entry");
+    row(r.remove_icon, '2', r.icon.as_ref(), "its icon");
+
+    if !r.user_data.is_empty() {
+        let first = r.user_data.first();
+        lines.push(Line::styled(
+            format!(
+                "[{}] {}   (3)",
+                if r.remove_data { "x" } else { " " },
+                first.map(|p| p.display().to_string()).unwrap_or_default()
+            ),
+            Style::default().fg(if r.remove_data { DANGER } else { DIM }),
+        ));
+        lines.push(Line::styled(
+            "    your settings and data — matched by name, so this is a guess.",
+            Style::default().fg(WARN),
+        ));
+        lines.push(Line::styled(
+            "    Off by default; nothing else here is uncertain.",
+            Style::default().fg(DIM),
+        ));
+    }
+
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        format!("{} item(s) will be deleted.", r.targets().len()),
+        Style::default().fg(WARN),
+    ));
+    lines.push(Line::styled(
+        "This is a plain file deletion — there is no undo and no snapshot.",
+        Style::default().fg(DANGER),
+    ));
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        "1/2/3 toggle   Enter remove   Esc cancel".to_string(),
+        Style::default().fg(DIM),
+    ));
+    render_popup(f, popup, " remove appimage ", lines);
 }
 
 /// Upgrading one package.
@@ -1425,7 +1548,7 @@ fn draw_keybar(f: &mut Frame, area: Rect, ui: &Ui) {
     } else {
         let mut h = vec![
             ("F1", "help"),
-            ("1-5/Tab", "views"),
+            ("1-6/Tab", "views"),
             ("f", "filter"),
             ("→", "open"),
             ("←", "back"),
@@ -1434,10 +1557,21 @@ fn draw_keybar(f: &mut Frame, area: Rect, ui: &Ui) {
             ("l", "files"),
             ("q", "quit"),
         ];
+        // Upgrading is only offered where the user can see what it would do.
+        if ui.view == View::Updates {
+            h = vec![
+                ("F1", "help"),
+                ("1-6/Tab", "views"),
+                ("u", "upgrade system"),
+                ("→", "upgrade this one"),
+                ("l", "files"),
+                ("q", "quit"),
+            ];
+        }
         if ui.view == View::Search {
             h = vec![
                 ("F1", "help"),
-                ("1-5/Tab", "views"),
+                ("1-6/Tab", "views"),
                 ("f", "type"),
                 ("→/Enter", "install"),
                 ("q", "quit"),
