@@ -89,16 +89,17 @@ than an error.
 
 ## Installing
 
+Build and install the package:
+
+```sh
+git clone https://github.com/ApollonGaitanos/Apothiki-TUI.git
+cd Apothiki-TUI/packaging && makepkg -si
+```
+
 Once it is on the AUR:
 
 ```sh
 paru -S apothiki        # or: yay -S apothiki
-```
-
-From a checkout, without an AUR helper:
-
-```sh
-cd packaging && makepkg -si
 ```
 
 Or just the binary, no package manager involved:

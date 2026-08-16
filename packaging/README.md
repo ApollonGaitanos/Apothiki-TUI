@@ -50,9 +50,19 @@ after the *repository* (`Apothiki-TUI-0.1.0`), not the package (`apothiki`).
 
 ## 4. Publish to the AUR
 
-This is the "one command" step. It needs an account at
-<https://aur.archlinux.org> with your SSH public key added under *My Account*
-— the AUR authenticates by key alone, and refuses the push otherwise.
+This is the "one command" step. It needs an AUR account, which is separate
+from GitHub:
+
+1. Register at <https://aur.archlinux.org/register>.
+2. Log in, then add your SSH public key at
+   `https://aur.archlinux.org/account/<your-user>/edit` under *SSH Public Key*.
+   The bare `/account/` URL 404s when logged out, which looks like an outage
+   and is not one.
+
+The AUR authenticates by key alone and refuses the push otherwise. The site is
+behind a proof-of-work bot check, so a 503 on the register page is usually
+transient — it needs JavaScript enabled and can fail under a strict content
+blocker or a VPN exit that is being rate-limited.
 
 ```sh
 cd packaging && ./publish-aur.sh

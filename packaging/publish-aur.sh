@@ -6,9 +6,12 @@
 # PKGBUILD, so the two are regenerated together here rather than trusted to
 # stay in step by hand.
 #
-# Requires an account at https://aur.archlinux.org with your SSH public key
-# added under My Account. The check below is up front on purpose: finding out
-# about a missing key after a half-finished clone is worse than not starting.
+# Requires an account at https://aur.archlinux.org/register with your SSH
+# public key added afterwards at https://aur.archlinux.org/account/<user>/edit.
+# Note that https://aur.archlinux.org/account/ on its own 404s unless you are
+# logged in, which reads like the site is broken when it is not. The check
+# below is up front on purpose: finding out about a missing key after a
+# half-finished clone is worse than not starting.
 set -euo pipefail
 
 pkgname=apothiki
@@ -19,8 +22,9 @@ if ! ssh -o BatchMode=yes -o ConnectTimeout=15 aur@aur.archlinux.org help >/dev/
   cat >&2 <<EOF
 error: the AUR refused this SSH key.
 
-Add the public key below at https://aur.archlinux.org/account/ under
-"SSH Public Key", then run this again:
+Register at https://aur.archlinux.org/register if you have not already,
+then add the key below at https://aur.archlinux.org/account/<user>/edit
+under "SSH Public Key", and run this again:
 
 $(cat ~/.ssh/id_ed25519.pub 2>/dev/null || echo "  (no ~/.ssh/id_ed25519.pub found)")
 EOF
