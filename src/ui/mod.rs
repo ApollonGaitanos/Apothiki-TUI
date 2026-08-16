@@ -1030,15 +1030,7 @@ impl Ui {
         });
         self.sync_rx = Some(rx);
 
-        // Update detection asks pacman rather than reconstructing its answer.
-        let (utx, urx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = utx.send(crate::ops::update::UpdatePlan {
-                repo: crate::ops::update::repo_updates(),
-                aur: Vec::new(),
-            });
-        });
-        self.updates_rx = Some(urx);
+        self.refresh_updates();
 
         // A cached index is used immediately; a download only starts when there
         // is none or it has aged out. Search over repositories works either way,
@@ -1176,6 +1168,24 @@ impl Ui {
             .collect()
     }
 
+    /// Re-runs update detection.
+    ///
+    /// Must happen after every successful operation, not only at startup: an
+    /// upgrade that still lists the thing it just upgraded is indistinguishable
+    /// from one that silently did nothing.
+    pub fn refresh_updates(&mut self) {
+        // Repository updates come from pacman, off the render loop; the AUR
+        // half is computed locally once the index and sync data are present.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::ops::update::UpdatePlan {
+                repo: crate::ops::update::repo_updates(),
+                aur: Vec::new(),
+            });
+        });
+        self.updates_rx = Some(rx);
+    }
+
     /// Re-runs the search for the current query.
     fn refresh_results(&mut self) {
         self.results = self.searcher.search(
@@ -1248,9 +1258,14 @@ impl Ui {
         self.app_package_names = d.app_package_names;
         self.apps_named_by_package = d.apps_named_by_package;
 
-        // Anything cached against the old snapshot is now meaningless.
+        // Anything cached against the old snapshot is now meaningless — the
+        // update list included, since the whole reason for reloading is usually
+        // that something was just installed, removed or upgraded.
         self.impact = None;
         self.icon = None;
+        self.updates = Default::default();
+        self.sorted_updates.clear();
+        self.refresh_updates();
         self.history.clear();
         self.rebuild_rows();
 
