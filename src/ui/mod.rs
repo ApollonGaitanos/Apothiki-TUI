@@ -1432,9 +1432,12 @@ impl Ui {
                     d.output.push(last);
                 }
             }
-            if success {
-                self.needs_reload = true;
-            }
+            // Reload whether or not it succeeded. A failed operation is not an
+            // unchanged system: the install that failed to build its AUR target
+            // had already installed two dependencies and taken two snapshots.
+            // Refreshing only on success leaves the view describing a system
+            // that no longer exists.
+            self.needs_reload = true;
         }
     }
 

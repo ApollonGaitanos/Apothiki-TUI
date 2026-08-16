@@ -88,9 +88,6 @@ impl AppImageRemoval {
         out
     }
 
-    pub fn command_line(&self) -> String {
-        format!("rm -r {}", self.targets().len())
-    }
 }
 
 /// Whether a path may be deleted by this program.

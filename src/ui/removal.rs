@@ -75,9 +75,6 @@ pub enum Job {
 }
 
 impl Job {
-    pub fn is_restore(&self) -> bool {
-        matches!(self, Job::Restore(_))
-    }
 
     pub fn as_removal(&self) -> Option<&RemovalRequest> {
         match self {
@@ -483,31 +480,6 @@ impl RemovalDialog {
         }
     }
 
-    /// Whether the dialog can proceed from the confirm stage.
-    pub fn can_proceed(&self) -> bool {
-        if self.blocked() {
-            return false;
-        }
-        match self.stage {
-            Stage::Confirm => !self.needs_typed_confirmation(),
-            Stage::TypeToConfirm => self.confirmation_satisfied(),
-            _ => false,
-        }
-    }
-}
-
-/// The outcome of asking the dialog to advance.
-pub enum Advance {
-    /// Stay open, nothing else to do.
-    Stay,
-    /// Move to typed confirmation.
-    NeedsTyping,
-    /// Ready to run; the caller should start the operation.
-    Execute,
-    /// Needs a password first.
-    NeedsPassword,
-    /// Abort with a message.
-    Abort(String),
 }
 
 /// Validates a plan against pacman immediately before running it.

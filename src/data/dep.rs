@@ -47,13 +47,6 @@ impl Dep {
             },
         }
     }
-
-    /// True for soname-style names such as `libGL.so`, which are provided by a
-    /// package rather than being one. Useful for presentation: showing a user
-    /// `libGL.so=1-64` in a dependency list is noise, showing `mesa` is not.
-    pub fn is_soname(&self) -> bool {
-        self.name.contains(".so")
-    }
 }
 
 impl std::fmt::Display for Dep {
@@ -96,7 +89,6 @@ mod tests {
         let d = Dep::parse("libalpm.so=16-64");
         assert_eq!(d.name, "libalpm.so");
         assert_eq!(d.constraint.as_deref(), Some("=16-64"));
-        assert!(d.is_soname());
 
         assert_eq!(name_of("libGL.so=1-64"), "libGL.so");
     }

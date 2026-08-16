@@ -193,24 +193,6 @@ pub enum Action {
 }
 
 impl Action {
-    /// The name used in the config file.
-    pub fn name(&self) -> String {
-        match self {
-            Action::Quit => "quit".into(),
-            Action::Help => "help".into(),
-            Action::Search => "search".into(),
-            Action::Remove => "remove".into(),
-            Action::Undo => "undo".into(),
-            Action::Files => "files".into(),
-            Action::Update => "update".into(),
-            Action::Refresh => "refresh".into(),
-            Action::NextView => "next_view".into(),
-            Action::PrevView => "prev_view".into(),
-            Action::View(n) => format!("view_{n}"),
-            Action::ToggleOrphanMode => "toggle_orphan_mode".into(),
-            Action::CleanOrphans => "clean_orphans".into(),
-        }
-    }
 
     pub fn from_name(name: &str) -> Option<Action> {
         Some(match name {
@@ -307,13 +289,6 @@ impl Keymap {
             .map(|(_, _, a)| *a)
     }
 
-    /// The first key bound to an action, for the hint bar.
-    pub fn key_for(&self, action: Action) -> Option<String> {
-        self.bindings
-            .iter()
-            .find(|(_, _, a)| *a == action)
-            .map(|(c, m, _)| describe_key(*c, *m))
-    }
 }
 
 /// Parses `ctrl+f`, `F5`, `delete`, `q`.

@@ -1300,7 +1300,6 @@ fn draw_detail(f: &mut Frame, area: Rect, ui: &mut Ui) {
     // "depends on" with "required by" is the single most confusing thing a
     // package tool can do (spec §5.2). The removal action sits above them.
     let rows = ui.related_rows();
-    let removable = ui.selected_package().is_some();
     let items: Vec<ListItem> = rows
         .iter()
         .map(|row| match row {
@@ -1335,7 +1334,6 @@ fn draw_detail(f: &mut Frame, area: Rect, ui: &mut Ui) {
         })
         .collect();
 
-    let _ = removable;
     let title = format!(
         " relationships ({}) — → to open, ← to go back ",
         rows.len().saturating_sub(1)

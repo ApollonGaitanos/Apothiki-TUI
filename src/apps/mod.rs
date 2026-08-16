@@ -51,12 +51,6 @@ pub enum Source {
     Unowned,
 }
 
-impl Source {
-    /// Whether this tool can remove it at all.
-    pub fn is_removable_by_us(&self) -> bool {
-        matches!(self, Source::Pacman | Source::Flatpak | Source::AppImage)
-    }
-}
 
 /// Why we believe this is an application. Every classification must be
 /// explainable in the UI — for a tool whose main job is deleting things,
