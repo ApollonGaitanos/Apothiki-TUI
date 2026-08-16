@@ -87,10 +87,11 @@ Requires `pacman`. Optional: `snapper` for snapshots, `paru` or `yay` for the
 AUR, `flatpak` for Flatpak applications. Each degrades to a stated absence rather
 than an error.
 
-## Installing locally
+## Installing
 
-The `PKGBUILD` targets a published repository, which does not exist yet. Until
-it does, install from this checkout:
+The `PKGBUILD` builds from the `v0.1.0` tag of
+<https://github.com/ApollonG/Apothiki>. Until that tag is pushed, install from
+this checkout:
 
 ```sh
 cargo build --release
@@ -99,3 +100,10 @@ install -Dm755 target/release/apo ~/.local/bin/apo
 
 `~/.local/bin` is already on `PATH` on most Arch setups. Nothing else needs
 installing — configuration and caches are created on first use.
+
+Once the tag exists, `makepkg -si` works from the repository root. Replace
+`sha256sums=('SKIP')` with the real checksum first.
+
+## Licence
+
+MIT. See [LICENSE](LICENSE).

@@ -108,12 +108,18 @@ impl Default for AurConfig {
 
 impl Default for ThemeConfig {
     fn default() -> Self {
+        // Explicit hex rather than ANSI names. The sixteen ANSI colours are
+        // whatever the user's terminal scheme says they are, which in practice
+        // means `darkgray` renders near-invisible on a dark background — and
+        // the text worst affected was the key hints, i.e. the part the user is
+        // meant to act on. These are chosen to stay vivid without glare, and
+        // to keep black text legible when used as a background.
         ThemeConfig {
-            accent: "cyan".into(),
-            dim: "darkgray".into(),
-            warn: "yellow".into(),
-            danger: "red".into(),
-            ok: "green".into(),
+            accent: "#89b4fa".into(),
+            dim: "#8b90a8".into(),
+            warn: "#f9e2af".into(),
+            danger: "#f38ba8".into(),
+            ok: "#a6e3a1".into(),
         }
     }
 }
@@ -409,7 +415,7 @@ impl Config {
     }
 }
 
-const EXAMPLE: &str = r#"# apothiki configuration. Every value here has a working default;
+const EXAMPLE: &str = r##"# apothiki configuration. Every value here has a working default;
 # delete anything you do not want to change.
 
 [apps]
@@ -438,12 +444,14 @@ helper = ""
 refresh_hours = 24
 
 [theme]
-# Colour names or #rrggbb.
-accent = "cyan"
-dim = "darkgray"
-warn = "yellow"
-danger = "red"
-ok = "green"
+# Colour names or #rrggbb. Commented out on purpose: a written-out value here
+# pins that colour forever, including through upgrades that improve the
+# default. Uncomment only what you actually want to override.
+# accent = "#89b4fa"
+# dim    = "#8b90a8"
+# warn   = "#f9e2af"
+# danger = "#f38ba8"
+# ok     = "#a6e3a1"
 
 [keys]
 # Rebinding an action replaces its default keys entirely.
@@ -456,7 +464,7 @@ ok = "green"
 # undo = "ctrl+z"
 # next_view = "tab"
 # view_1 = "1"
-"#;
+"##;
 
 #[cfg(test)]
 mod tests {
@@ -484,7 +492,10 @@ mod tests {
         assert_eq!(c.aur.helper, "yay");
         assert_eq!(c.aur.refresh_hours, 24);
         assert!(!c.apps.noise.is_empty());
-        assert_eq!(c.theme.accent, "cyan");
+        // Compared against the default rather than a literal colour: what is
+        // under test is that an untouched section falls through, not which
+        // shade of blue the default happens to be this year.
+        assert_eq!(c.theme.accent, ThemeConfig::default().accent);
     }
 
     #[test]
@@ -583,5 +594,16 @@ mod tests {
         // It ships as documentation, so it must actually parse.
         let parsed: Result<Config, _> = toml::from_str(EXAMPLE);
         assert!(parsed.is_ok(), "{:?}", parsed.err());
+    }
+
+    #[test]
+    fn the_example_config_does_not_pin_the_palette() {
+        // Writing live colour values froze the old palette on any machine that
+        // had ever run `apo config`, so a improved default never reached the
+        // people most likely to have run it. Colours stay commented out.
+        let parsed: Config = toml::from_str(EXAMPLE).unwrap();
+        let d = ThemeConfig::default();
+        assert_eq!(parsed.theme.accent, d.accent);
+        assert_eq!(parsed.theme.dim, d.dim);
     }
 }

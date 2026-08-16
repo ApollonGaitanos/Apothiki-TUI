@@ -69,6 +69,65 @@ fn plural(n: usize, singular: &str) -> String {
     format!("{n} {plural}")
 }
 
+/// One key the user can press, as it appears in a footer.
+///
+/// `primary` marks the action the dialog exists to offer — the button a mouse
+/// user would click. There is at most one per bar.
+struct Key<'a> {
+    key: &'a str,
+    label: &'a str,
+    primary: bool,
+}
+
+/// `Enter` / `Esc` and friends, rendered as filled key caps.
+///
+/// These are not decoration and they are not a legend: in a dialog they *are*
+/// the buttons, and dim grey text at the bottom of a box reads as a footnote
+/// nobody is expected to act on. The key gets a filled cap so it can be found
+/// without reading, the primary action takes the dialog's own severity colour
+/// so the confirming key and the border agree, and no label is dimmed.
+fn key_bar(keys: &[Key], primary_colour: Color) -> Line<'static> {
+    let mut spans: Vec<Span> = Vec::new();
+    for k in keys {
+        let cap = if k.primary { primary_colour } else { DIM() };
+        spans.push(Span::styled(
+            format!(" {} ", k.key),
+            Style::default()
+                .bg(cap)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(
+            format!(" {}   ", k.label),
+            if k.primary {
+                Style::default().fg(primary_colour).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            },
+        ));
+    }
+    Line::from(spans)
+}
+
+/// The common case: a primary action and a way out.
+fn confirm_bar(key: &str, label: &str, colour: Color) -> Line<'static> {
+    key_bar(
+        &[
+            Key { key, label, primary: true },
+            Key { key: "Esc", label: "cancel", primary: false },
+        ],
+        colour,
+    )
+}
+
+/// A dismiss-only footer, for dialogs that report rather than ask.
+fn close_bar() -> Line<'static> {
+    key_bar(
+        &[Key { key: "Esc", label: "close", primary: true }],
+        ACCENT(),
+    )
+}
+
 /// A framed pane in the shared style.
 ///
 /// Every border in the program comes from here. Rounded corners and one column
@@ -367,7 +426,7 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
                     "There is no way to force this, and that is deliberate.",
                     Style::default().fg(DIM()),
                 ));
-                lines.push(Line::styled("Esc to close", Style::default().fg(DIM())));
+                lines.push(close_bar());
                 render_popup_styled(f, popup, &title, lines, severity);
                 return;
             }
@@ -389,26 +448,42 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
                     "pacman would refuse this removal.",
                     Style::default().fg(DIM()),
                 ));
-                lines.push(Line::styled("Esc to close", Style::default().fg(DIM())));
+                lines.push(close_bar());
                 render_popup_styled(f, popup, &title, lines, severity);
                 return;
             }
 
             lines.push(Line::raw(""));
+            // The mode is the most consequential choice in the program — -R and
+            // -Rns differ by whether the user's configuration survives — so the
+            // options are drawn as things to be picked, not as a legend. The
+            // selected one carries a filled bar, and the alternatives stay at
+            // full contrast: they are choices, not chrome.
             for (i, m) in RemovalMode::ALL.iter().enumerate() {
                 let selected = i == d.mode_index;
-                let marker = if selected { "▸ " } else { "  " };
+                // Padded to a fixed width so the selected row is a solid block
+                // rather than a bar that stops wherever the label happens to
+                // end. Narrow enough that it cannot wrap in a small terminal.
+                let row = format!(
+                    "{} {:<34}{:<8}",
+                    if selected { "▸" } else { " " },
+                    m.label(),
+                    m.flags()
+                );
                 lines.push(Line::styled(
-                    format!("{marker}{}  ({})", m.label(), m.flags()),
+                    row,
                     if selected {
-                        Style::default().add_modifier(Modifier::BOLD)
+                        Style::default()
+                            .bg(ACCENT())
+                            .fg(Color::Black)
+                            .add_modifier(Modifier::BOLD)
                     } else {
-                        Style::default().fg(DIM())
+                        Style::default()
                     },
                 ));
                 if selected {
                     lines.push(Line::styled(
-                        format!("    {}", m.detail()),
+                        format!("   {}", m.detail()),
                         Style::default().fg(DIM()),
                     ));
                 }
@@ -465,13 +540,20 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
             ]));
 
             lines.push(Line::raw(""));
-            lines.push(Line::styled(
-                format!(
-                    "[{}] snapper snapshot first  (Ctrl+S)",
-                    if d.snapshot { "x" } else { " " }
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!(
+                        "[{}] snapper snapshot first  ",
+                        if d.snapshot { "x" } else { " " }
+                    ),
+                    Style::default().fg(if d.snapshot { OK() } else { DIM() }),
                 ),
-                Style::default().fg(if d.snapshot { OK() } else { DIM() }),
-            ));
+                Span::styled(
+                    " Ctrl+S ",
+                    Style::default().bg(DIM()).fg(Color::Black),
+                ),
+                Span::styled(" toggle", Style::default().fg(DIM())),
+            ]));
             lines.push(Line::styled(
                 format!("$ {}", req.command_line(graph)),
                 Style::default().fg(DIM()),
@@ -503,17 +585,26 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
             }
 
             lines.push(Line::raw(""));
-            lines.push(Line::styled(
-                if req.risk.needs_typed_confirmation() && !matches!(d.stage, Stage::TypeToConfirm) {
-                    "↑↓ mode   Enter/→ continue   Esc cancel"
-                } else if matches!(d.stage, Stage::TypeToConfirm) {
-                    "Enter confirm   Esc cancel"
+            // The confirming key is coloured by the same risk tier as the
+            // border, so the button the user is about to press says what it is
+            // about to do.
+            lines.push(if matches!(d.stage, Stage::TypeToConfirm) {
+                confirm_bar("Enter", "confirm removal", risk_colour)
+            } else {
+                let verb = if req.risk.needs_typed_confirmation() {
+                    "continue"
                 } else {
-                    "↑↓ mode   Enter/→ remove   Esc cancel"
-                }
-                .to_string(),
-                Style::default().fg(DIM()),
-            ));
+                    "remove"
+                };
+                key_bar(
+                    &[
+                        Key { key: "↑↓", label: "mode", primary: false },
+                        Key { key: "Enter", label: verb, primary: true },
+                        Key { key: "Esc", label: "cancel", primary: false },
+                    ],
+                    risk_colour,
+                )
+            });
         }
         Stage::Password => {
             lines.push(Line::raw("Administrator password required."));
@@ -527,7 +618,7 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
             if let Some(e) = &d.error {
                 lines.push(Line::styled(e.clone(), Style::default().fg(DANGER())));
             }
-            lines.push(Line::styled("Enter confirm   Esc cancel", Style::default().fg(DIM())));
+            lines.push(confirm_bar("Enter", "authorise", ACCENT()));
         }
         Stage::Running | Stage::Done { .. } => {
             if matches!(d.stage, Stage::Running) && d.output.len() < 3 {
@@ -535,9 +626,9 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
                     "Working. AUR packages are compiled here, which can take a while.",
                     Style::default().fg(DIM()),
                 ));
-                lines.push(Line::styled(
-                    "Ctrl+C stops it.",
-                    Style::default().fg(DIM()),
+                lines.push(key_bar(
+                    &[Key { key: "Ctrl+C", label: "stop", primary: false }],
+                    ACCENT(),
                 ));
                 lines.push(Line::raw(""));
             }
@@ -561,12 +652,15 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
                     Span::styled("▏", Style::default().fg(ACCENT())),
                 ]));
                 lines.push(Line::styled(
-                    "type an answer and press Enter; empty Enter takes the default",
+                    "empty Enter takes the default",
                     Style::default().fg(DIM()),
                 ));
-                lines.push(Line::styled(
-                    "Ctrl+C stops the command",
-                    Style::default().fg(DIM()),
+                lines.push(key_bar(
+                    &[
+                        Key { key: "Enter", label: "send answer", primary: true },
+                        Key { key: "Ctrl+C", label: "stop", primary: false },
+                    ],
+                    ACCENT(),
                 ));
             }
             if let Some(e) = &d.error {
@@ -575,7 +669,7 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
             match d.stage {
                 Stage::Done { success: true } => {
                     lines.push(Line::styled("Finished.", Style::default().fg(OK())));
-                    lines.push(Line::styled("Esc to close", Style::default().fg(DIM())));
+                    lines.push(close_bar());
                 }
                 Stage::Done { success: false } => {
                     // Never claim nothing changed: an install that fails at the
@@ -590,7 +684,7 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
                         "removed or snapshotted already happened.",
                         Style::default().fg(WARN()),
                     ));
-                    lines.push(Line::styled("Esc to close", Style::default().fg(DIM())));
+                    lines.push(close_bar());
                 }
                 _ => {}
             }
@@ -668,10 +762,7 @@ fn draw_flatpak_confirm(f: &mut Frame, popup: Rect, r: &crate::ops::bundle::Flat
         Style::default().fg(DIM()),
     ));
     lines.push(Line::raw(""));
-    lines.push(Line::styled(
-        "Enter remove   Esc cancel".to_string(),
-        Style::default().fg(DIM()),
-    ));
+    lines.push(confirm_bar("Enter", "remove", WARN()));
     render_popup_styled(f, popup, "remove flatpak", lines, WARN());
 }
 
@@ -738,9 +829,13 @@ fn draw_appimage_confirm(f: &mut Frame, popup: Rect, r: &crate::ops::bundle::App
         Style::default().fg(DANGER()),
     ));
     lines.push(Line::raw(""));
-    lines.push(Line::styled(
-        "1/2/3 toggle   Enter remove   Esc cancel".to_string(),
-        Style::default().fg(DIM()),
+    lines.push(key_bar(
+        &[
+            Key { key: "1/2/3", label: "toggle", primary: false },
+            Key { key: "Enter", label: "delete", primary: true },
+            Key { key: "Esc", label: "cancel", primary: false },
+        ],
+        DANGER(),
     ));
     render_popup_styled(f, popup, "remove appimage", lines, DANGER());
 }
@@ -821,10 +916,7 @@ fn draw_single_update_confirm(
         Style::default().fg(DIM()),
     ));
     lines.push(Line::raw(""));
-    lines.push(Line::styled(
-        "Enter upgrade anyway   Esc cancel".to_string(),
-        Style::default().fg(DIM()),
-    ));
+    lines.push(confirm_bar("Enter", "upgrade anyway", WARN()));
     render_popup_styled(f, popup, "upgrade one package", lines, WARN());
 }
 
@@ -937,9 +1029,14 @@ fn draw_update_confirm(
         Style::default().fg(DIM()),
     ));
     lines.push(Line::raw(""));
-    lines.push(Line::styled(
-        "Enter upgrade   a toggle answers   Ctrl+S snapshot   Esc cancel".to_string(),
-        Style::default().fg(DIM()),
+    lines.push(key_bar(
+        &[
+            Key { key: "Enter", label: "upgrade", primary: true },
+            Key { key: "a", label: "answer prompts", primary: false },
+            Key { key: "Ctrl+S", label: "snapshot", primary: false },
+            Key { key: "Esc", label: "cancel", primary: false },
+        ],
+        OK(),
     ));
     render_popup_styled(f, popup, "update", lines, OK());
 }
@@ -993,15 +1090,15 @@ fn draw_install_confirm(f: &mut Frame, popup: Rect, request: &crate::ops::Instal
     lines.push(Line::raw(""));
 
     let blocked = request.source == crate::ops::InstallSource::Aur && request.helper.is_none();
-    lines.push(Line::styled(
-        if blocked {
-            "Cannot continue without an AUR helper.   Esc to close"
-        } else {
-            "Enter install   Esc cancel"
-        }
-        .to_string(),
-        Style::default().fg(if blocked { DANGER() } else { DIM() }),
-    ));
+    if blocked {
+        lines.push(Line::styled(
+            "Cannot continue without an AUR helper.",
+            Style::default().fg(DANGER()),
+        ));
+        lines.push(close_bar());
+    } else {
+        lines.push(confirm_bar("Enter", "install", OK()));
+    }
     render_popup_styled(f, popup, "install", lines, if blocked { DANGER() } else { OK() });
 }
 
@@ -1048,7 +1145,7 @@ fn draw_restore_confirm(f: &mut Frame, popup: Rect, plan: &crate::ops::restore::
             "Reinstall from the repositories instead, or roll back the snapshot.",
             Style::default().fg(DIM()),
         ));
-        lines.push(Line::styled("Esc to close", Style::default().fg(DIM())));
+        lines.push(close_bar());
         render_popup_styled(f, popup, "undo", lines, WARN());
         return;
     }
@@ -1085,10 +1182,7 @@ fn draw_restore_confirm(f: &mut Frame, popup: Rect, plan: &crate::ops::restore::
         Style::default().fg(DIM()),
     ));
     lines.push(Line::raw(""));
-    lines.push(Line::styled(
-        "Enter restore   Esc cancel",
-        Style::default().fg(DIM()),
-    ));
+    lines.push(confirm_bar("Enter", "restore", OK()));
     render_popup_styled(f, popup, "undo", lines, OK());
 }
 
