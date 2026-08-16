@@ -109,7 +109,17 @@ impl Denylist {
     /// The transitive step is the point. Protecting `systemd` while leaving its
     /// dependencies removable would let a user break the boot by deleting
     /// something two levels down that pacman would happily take.
+    /// Builds with no extra protections. Convenience for tests and tooling.
     pub fn build(graph: &Graph) -> Self {
+        Self::build_with(graph, &[])
+    }
+
+    /// Builds the protected set, plus any names the user added.
+    ///
+    /// `also_protect` is additive only. There is no configuration that makes a
+    /// built-in protected package removable: a config-file escape hatch is
+    /// still an escape hatch, and §6.1 says there is none.
+    pub fn build_with(graph: &Graph, also_protect: &[String]) -> Self {
         let mut protected: HashMap<PkgIdx, Protection> = HashMap::new();
         let mut roots: Vec<(PkgIdx, String)> = Vec::new();
 
@@ -119,6 +129,8 @@ impl Denylist {
 
             let reason = if PROTECTED_NAMES.contains(&name) {
                 Some("core system package".to_string())
+            } else if also_protect.iter().any(|n| n == name) {
+                Some("protected in your config".to_string())
             } else if let Some(g) = pkg
                 .groups
                 .iter()

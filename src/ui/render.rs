@@ -14,11 +14,42 @@ use crate::apps::{Evidence, Source};
 use crate::data::graph::OrphanMode;
 use crate::data::local::Reason;
 
-const ACCENT: Color = Color::Cyan;
-const DIM: Color = Color::DarkGray;
-const WARN: Color = Color::Yellow;
-const DANGER: Color = Color::Red;
-const OK: Color = Color::Green;
+/// The palette, set once at startup from the user's config.
+///
+/// A global rather than a parameter because roughly a hundred call sites need
+/// it, half of them in helpers that have no reason to know about `Ui`. It is
+/// written once before the first frame and only read afterwards.
+static THEME: std::sync::OnceLock<crate::config::Theme> = std::sync::OnceLock::new();
+
+/// Installs the palette. Called before the first draw; later calls are ignored.
+pub fn set_theme(theme: crate::config::Theme) {
+    let _ = THEME.set(theme);
+}
+
+fn theme() -> &'static crate::config::Theme {
+    THEME.get_or_init(crate::config::Theme::default)
+}
+
+#[allow(non_snake_case)]
+fn ACCENT() -> Color {
+    theme().accent
+}
+#[allow(non_snake_case)]
+fn DIM() -> Color {
+    theme().dim
+}
+#[allow(non_snake_case)]
+fn WARN() -> Color {
+    theme().warn
+}
+#[allow(non_snake_case)]
+fn DANGER() -> Color {
+    theme().danger
+}
+#[allow(non_snake_case)]
+fn OK() -> Color {
+    theme().ok
+}
 
 pub fn draw(f: &mut Frame, ui: &mut Ui) {
     let banner = u16::from(ui.state.db_locked);
@@ -76,11 +107,11 @@ fn draw_locations(f: &mut Frame, area: Rect, ui: &Ui) {
     for group in groups {
         lines.push(Line::styled(
             group.title.to_string(),
-            Style::default().add_modifier(Modifier::BOLD).fg(ACCENT),
+            Style::default().add_modifier(Modifier::BOLD).fg(ACCENT()),
         ));
         lines.push(Line::styled(
             group.explanation.to_string(),
-            Style::default().fg(DIM),
+            Style::default().fg(DIM()),
         ));
         for entry in &group.paths {
             let is_selected = entry.exists && selectable == ui.locations_selected;
@@ -91,7 +122,7 @@ fn draw_locations(f: &mut Frame, area: Rect, ui: &Ui) {
             let mut spans = vec![Span::styled(
                 format!("{marker}{}", entry.path),
                 Style::default()
-                    .fg(if entry.guessed { WARN } else { Color::Reset })
+                    .fg(if entry.guessed { WARN() } else { Color::Reset })
                     .add_modifier(if is_selected {
                         Modifier::BOLD | Modifier::REVERSED
                     } else {
@@ -101,14 +132,14 @@ fn draw_locations(f: &mut Frame, area: Rect, ui: &Ui) {
             if let Some(size) = entry.size {
                 spans.push(Span::styled(
                     format!("  {}", human_size(size)),
-                    Style::default().fg(DIM),
+                    Style::default().fg(DIM()),
                 ));
             }
             if entry.guessed {
-                spans.push(Span::styled("  (guess)", Style::default().fg(DIM)));
+                spans.push(Span::styled("  (guess)", Style::default().fg(DIM())));
             }
             if !entry.exists {
-                spans.push(Span::styled("  (not present)", Style::default().fg(DIM)));
+                spans.push(Span::styled("  (not present)", Style::default().fg(DIM())));
             }
             lines.push(Line::from(spans));
         }
@@ -118,7 +149,7 @@ fn draw_locations(f: &mut Frame, area: Rect, ui: &Ui) {
     if groups.is_empty() {
         lines.push(Line::styled(
             "This package owns no files worth listing.",
-            Style::default().fg(DIM),
+            Style::default().fg(DIM()),
         ));
     }
 
@@ -129,7 +160,7 @@ fn draw_locations(f: &mut Frame, area: Rect, ui: &Ui) {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(ACCENT))
+                    .border_style(Style::default().fg(ACCENT()))
                     .title(format!(
                         " files of {name} — ↑↓ select, → open, PgUp/PgDn scroll, Esc close "
                     )),
@@ -202,20 +233,20 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
             let names = req.package_names(graph);
             lines.push(Line::styled(
                 names.join(", "),
-                Style::default().add_modifier(Modifier::BOLD).fg(ACCENT),
+                Style::default().add_modifier(Modifier::BOLD).fg(ACCENT()),
             ));
 
             // A blocked removal explains itself and offers nothing. There is no
             // override, by design (spec §6.1).
             if let Some(p) = &req.blocked_by {
                 lines.push(Line::raw(""));
-                lines.push(Line::styled(p.explain(), Style::default().fg(DANGER)));
+                lines.push(Line::styled(p.explain(), Style::default().fg(DANGER())));
                 lines.push(Line::raw(""));
                 lines.push(Line::styled(
                     "There is no way to force this, and that is deliberate.",
-                    Style::default().fg(DIM),
+                    Style::default().fg(DIM()),
                 ));
-                lines.push(Line::styled("Esc to close", Style::default().fg(DIM)));
+                lines.push(Line::styled("Esc to close", Style::default().fg(DIM())));
                 render_popup(f, popup, title, lines);
                 return;
             }
@@ -231,13 +262,13 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
                 lines.push(Line::raw(""));
                 lines.push(Line::styled(
                     format!("Still required by: {}", who.join(", ")),
-                    Style::default().fg(DANGER),
+                    Style::default().fg(DANGER()),
                 ));
                 lines.push(Line::styled(
                     "pacman would refuse this removal.",
-                    Style::default().fg(DIM),
+                    Style::default().fg(DIM()),
                 ));
-                lines.push(Line::styled("Esc to close", Style::default().fg(DIM)));
+                lines.push(Line::styled("Esc to close", Style::default().fg(DIM())));
                 render_popup(f, popup, title, lines);
                 return;
             }
@@ -251,13 +282,13 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
                     if selected {
                         Style::default().add_modifier(Modifier::BOLD)
                     } else {
-                        Style::default().fg(DIM)
+                        Style::default().fg(DIM())
                     },
                 ));
                 if selected {
                     lines.push(Line::styled(
                         format!("    {}", m.detail()),
-                        Style::default().fg(DIM),
+                        Style::default().fg(DIM()),
                     ));
                 }
             }
@@ -271,7 +302,7 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
             if !req.apps_lost.is_empty() {
                 lines.push(Line::styled(
                     format!("Applications removed: {}", req.apps_lost.join(", ")),
-                    Style::default().fg(DANGER),
+                    Style::default().fg(DANGER()),
                 ));
             }
             if !req.plan.optdep_losses.is_empty() {
@@ -284,14 +315,14 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
                     .collect();
                 lines.push(Line::styled(
                     format!("Silently degrades: {}", who.join(", ")),
-                    Style::default().fg(WARN),
+                    Style::default().fg(WARN()),
                 ));
             }
 
             let risk_colour = match req.risk {
-                Risk::Safe => OK,
-                Risk::Caution => WARN,
-                _ => DANGER,
+                Risk::Safe => OK(),
+                Risk::Caution => WARN(),
+                _ => DANGER(),
             };
             lines.push(Line::raw(""));
             lines.push(Line::styled(
@@ -309,25 +340,25 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
                     "[{}] snapper snapshot first  (Ctrl+S)",
                     if d.snapshot { "x" } else { " " }
                 ),
-                Style::default().fg(if d.snapshot { OK } else { DIM }),
+                Style::default().fg(if d.snapshot { OK() } else { DIM() }),
             ));
             lines.push(Line::styled(
                 format!("$ {}", req.command_line(graph)),
-                Style::default().fg(DIM),
+                Style::default().fg(DIM()),
             ));
 
             if matches!(d.stage, Stage::TypeToConfirm) {
                 use super::removal::ConfirmState;
                 let state = d.confirmation_state();
                 let colour = match state {
-                    ConfirmState::Matches => OK,
-                    ConfirmState::Wrong => DANGER,
-                    _ => WARN,
+                    ConfirmState::Matches => OK(),
+                    ConfirmState::Wrong => DANGER(),
+                    _ => WARN(),
                 };
                 lines.push(Line::raw(""));
                 lines.push(Line::styled(
                     format!("Type \"{}\" to confirm:", d.confirm_word),
-                    Style::default().fg(DANGER).add_modifier(Modifier::BOLD),
+                    Style::default().fg(DANGER()).add_modifier(Modifier::BOLD),
                 ));
                 lines.push(Line::styled(
                     format!("  {}▏", d.typed),
@@ -351,7 +382,7 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
                     "↑↓ mode   Enter/→ remove   Esc cancel"
                 }
                 .to_string(),
-                Style::default().fg(DIM),
+                Style::default().fg(DIM()),
             ));
         }
         Stage::Password => {
@@ -361,31 +392,31 @@ fn draw_removal(f: &mut Frame, area: Rect, ui: &Ui) {
             lines.push(Line::raw(""));
             lines.push(Line::styled(
                 "Used only to authorise this operation, then discarded.",
-                Style::default().fg(DIM),
+                Style::default().fg(DIM()),
             ));
             if let Some(e) = &d.error {
-                lines.push(Line::styled(e.clone(), Style::default().fg(DANGER)));
+                lines.push(Line::styled(e.clone(), Style::default().fg(DANGER())));
             }
-            lines.push(Line::styled("Enter confirm   Esc cancel", Style::default().fg(DIM)));
+            lines.push(Line::styled("Enter confirm   Esc cancel", Style::default().fg(DIM())));
         }
         Stage::Running | Stage::Done { .. } => {
             for l in d.output.iter().rev().take(20).collect::<Vec<_>>().into_iter().rev() {
                 lines.push(Line::raw(l.clone()));
             }
             if let Some(e) = &d.error {
-                lines.push(Line::styled(e.clone(), Style::default().fg(DANGER)));
+                lines.push(Line::styled(e.clone(), Style::default().fg(DANGER())));
             }
             match d.stage {
                 Stage::Done { success: true } => {
-                    lines.push(Line::styled("Finished.", Style::default().fg(OK)));
-                    lines.push(Line::styled("Esc to close", Style::default().fg(DIM)));
+                    lines.push(Line::styled("Finished.", Style::default().fg(OK())));
+                    lines.push(Line::styled("Esc to close", Style::default().fg(DIM())));
                 }
                 Stage::Done { success: false } => {
                     lines.push(Line::styled(
                         "Nothing was changed.",
-                        Style::default().fg(WARN),
+                        Style::default().fg(WARN()),
                     ));
-                    lines.push(Line::styled("Esc to close", Style::default().fg(DIM)));
+                    lines.push(Line::styled("Esc to close", Style::default().fg(DIM())));
                 }
                 _ => {}
             }
@@ -415,7 +446,7 @@ fn draw_pkgbuild(
         Paragraph::new(lines).scroll((scroll, 0)).block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(WARN))
+                .border_style(Style::default().fg(WARN()))
                 .title(format!(
                     " PKGBUILD for {} — PgUp/PgDn scroll, P back ",
                     request.package
@@ -429,7 +460,7 @@ fn draw_pkgbuild(
 fn draw_flatpak_confirm(f: &mut Frame, popup: Rect, r: &crate::ops::bundle::FlatpakRemoval) {
     let mut lines: Vec<Line> = vec![Line::styled(
         r.name.clone(),
-        Style::default().add_modifier(Modifier::BOLD).fg(ACCENT),
+        Style::default().add_modifier(Modifier::BOLD).fg(ACCENT()),
     )];
     lines.push(Line::raw(""));
     lines.push(field("flatpak id", &r.id));
@@ -447,25 +478,25 @@ fn draw_flatpak_confirm(f: &mut Frame, popup: Rect, r: &crate::ops::bundle::Flat
             "[{}] also remove unused runtimes",
             if r.remove_unused { "x" } else { " " }
         ),
-        Style::default().fg(if r.remove_unused { OK } else { DIM }),
+        Style::default().fg(if r.remove_unused { OK() } else { DIM() }),
     ));
     lines.push(Line::styled(
         "Runtimes are Flatpak's shared dependencies — this is where the",
-        Style::default().fg(DIM),
+        Style::default().fg(DIM()),
     ));
     lines.push(Line::styled(
         "space actually comes back.",
-        Style::default().fg(DIM),
+        Style::default().fg(DIM()),
     ));
     lines.push(Line::raw(""));
     lines.push(Line::styled(
         format!("$ {}", r.command_line()),
-        Style::default().fg(DIM),
+        Style::default().fg(DIM()),
     ));
     lines.push(Line::raw(""));
     lines.push(Line::styled(
         "Enter remove   Esc cancel".to_string(),
-        Style::default().fg(DIM),
+        Style::default().fg(DIM()),
     ));
     render_popup(f, popup, " remove flatpak ", lines);
 }
@@ -474,30 +505,30 @@ fn draw_flatpak_confirm(f: &mut Frame, popup: Rect, r: &crate::ops::bundle::Flat
 fn draw_appimage_confirm(f: &mut Frame, popup: Rect, r: &crate::ops::bundle::AppImageRemoval) {
     let mut lines: Vec<Line> = vec![Line::styled(
         r.name.clone(),
-        Style::default().add_modifier(Modifier::BOLD).fg(ACCENT),
+        Style::default().add_modifier(Modifier::BOLD).fg(ACCENT()),
     )];
     lines.push(Line::styled(
         "A self-contained bundle — nothing else depends on it.",
-        Style::default().fg(DIM),
+        Style::default().fg(DIM()),
     ));
     lines.push(Line::raw(""));
 
     lines.push(Line::styled(
         format!("[x] {}", r.bundle.display()),
-        Style::default().fg(OK),
+        Style::default().fg(OK()),
     ));
     lines.push(Line::styled(
         "    the application itself",
-        Style::default().fg(DIM),
+        Style::default().fg(DIM()),
     ));
 
     let mut row = |on: bool, key: char, path: Option<&std::path::PathBuf>, what: &str| {
         if let Some(p) = path {
             lines.push(Line::styled(
                 format!("[{}] {}   ({key})", if on { "x" } else { " " }, p.display()),
-                Style::default().fg(if on { OK } else { DIM }),
+                Style::default().fg(if on { OK() } else { DIM() }),
             ));
-            lines.push(Line::styled(format!("    {what}"), Style::default().fg(DIM)));
+            lines.push(Line::styled(format!("    {what}"), Style::default().fg(DIM())));
         }
     };
     row(r.remove_desktop, '1', r.desktop_entry.as_ref(), "its launcher entry");
@@ -511,31 +542,31 @@ fn draw_appimage_confirm(f: &mut Frame, popup: Rect, r: &crate::ops::bundle::App
                 if r.remove_data { "x" } else { " " },
                 first.map(|p| p.display().to_string()).unwrap_or_default()
             ),
-            Style::default().fg(if r.remove_data { DANGER } else { DIM }),
+            Style::default().fg(if r.remove_data { DANGER() } else { DIM() }),
         ));
         lines.push(Line::styled(
             "    your settings and data — matched by name, so this is a guess.",
-            Style::default().fg(WARN),
+            Style::default().fg(WARN()),
         ));
         lines.push(Line::styled(
             "    Off by default; nothing else here is uncertain.",
-            Style::default().fg(DIM),
+            Style::default().fg(DIM()),
         ));
     }
 
     lines.push(Line::raw(""));
     lines.push(Line::styled(
         format!("{} item(s) will be deleted.", r.targets().len()),
-        Style::default().fg(WARN),
+        Style::default().fg(WARN()),
     ));
     lines.push(Line::styled(
         "This is a plain file deletion — there is no undo and no snapshot.",
-        Style::default().fg(DANGER),
+        Style::default().fg(DANGER()),
     ));
     lines.push(Line::raw(""));
     lines.push(Line::styled(
         "1/2/3 toggle   Enter remove   Esc cancel".to_string(),
-        Style::default().fg(DIM),
+        Style::default().fg(DIM()),
     ));
     render_popup(f, popup, " remove appimage ", lines);
 }
@@ -555,44 +586,44 @@ fn draw_single_update_confirm(
 
     let mut lines: Vec<Line> = vec![Line::styled(
         format!("{}  {} → {}", u.name, u.installed, u.available),
-        Style::default().add_modifier(Modifier::BOLD).fg(ACCENT),
+        Style::default().add_modifier(Modifier::BOLD).fg(ACCENT()),
     )];
     lines.push(Line::raw(""));
 
     if u.source == UpdateSource::Repo {
         lines.push(Line::styled(
             "This is a partial upgrade.",
-            Style::default().fg(DANGER).add_modifier(Modifier::BOLD),
+            Style::default().fg(DANGER()).add_modifier(Modifier::BOLD),
         ));
         lines.push(Line::styled(
             "The new build expects library versions the rest of your system",
-            Style::default().fg(DIM),
+            Style::default().fg(DIM()),
         ));
         lines.push(Line::styled(
             "does not have yet. It may work, or it may break this program —",
-            Style::default().fg(DIM),
+            Style::default().fg(DIM()),
         ));
         lines.push(Line::styled(
             "or your session — in ways that surface days later.",
-            Style::default().fg(DIM),
+            Style::default().fg(DIM()),
         ));
         lines.push(Line::raw(""));
         lines.push(Line::styled(
             "Esc, then u, upgrades everything together instead.",
-            Style::default().fg(OK),
+            Style::default().fg(OK()),
         ));
     } else {
         lines.push(Line::styled(
             "Rebuilt from source by the AUR helper.",
-            Style::default().fg(WARN),
+            Style::default().fg(WARN()),
         ));
         lines.push(Line::styled(
             "Safer than a partial repository upgrade, but the build can still",
-            Style::default().fg(DIM),
+            Style::default().fg(DIM()),
         ));
         lines.push(Line::styled(
             "pull repository packages forward on its own.",
-            Style::default().fg(DIM),
+            Style::default().fg(DIM()),
         ));
     }
 
@@ -602,7 +633,7 @@ fn draw_single_update_confirm(
             "[{}] snapper snapshot first  (Ctrl+S)",
             if snapshot { "x" } else { " " }
         ),
-        Style::default().fg(if snapshot { OK } else { DIM }),
+        Style::default().fg(if snapshot { OK() } else { DIM() }),
     ));
     lines.push(Line::styled(
         format!(
@@ -613,12 +644,12 @@ fn draw_single_update_confirm(
             },
             u.name
         ),
-        Style::default().fg(DIM),
+        Style::default().fg(DIM()),
     ));
     lines.push(Line::raw(""));
     lines.push(Line::styled(
         "Enter upgrade anyway   Esc cancel".to_string(),
-        Style::default().fg(DIM),
+        Style::default().fg(DIM()),
     ));
     render_popup(f, popup, " upgrade one package ", lines);
 }
@@ -636,14 +667,14 @@ fn draw_update_confirm(
 ) {
     let mut lines: Vec<Line> = vec![Line::styled(
         format!("{} update(s) available", plan.total()),
-        Style::default().add_modifier(Modifier::BOLD).fg(ACCENT),
+        Style::default().add_modifier(Modifier::BOLD).fg(ACCENT()),
     )];
     lines.push(Line::raw(""));
 
     if !plan.repo.is_empty() {
         lines.push(Line::styled(
             format!("Repository ({})", plan.repo.len()),
-            Style::default().fg(OK),
+            Style::default().fg(OK()),
         ));
         for u in plan.repo.iter().take(8) {
             lines.push(Line::raw(format!(
@@ -654,7 +685,7 @@ fn draw_update_confirm(
         if plan.repo.len() > 8 {
             lines.push(Line::styled(
                 format!("  … and {} more", plan.repo.len() - 8),
-                Style::default().fg(DIM),
+                Style::default().fg(DIM()),
             ));
         }
     }
@@ -662,7 +693,7 @@ fn draw_update_confirm(
         lines.push(Line::raw(""));
         lines.push(Line::styled(
             format!("AUR ({}) — rebuilt from source", plan.aur.len()),
-            Style::default().fg(WARN),
+            Style::default().fg(WARN()),
         ));
         for u in plan.aur.iter().take(6) {
             lines.push(Line::raw(format!(
@@ -679,15 +710,15 @@ fn draw_update_confirm(
     ));
     lines.push(Line::styled(
         "Upgrading one package on its own is a partial upgrade: it links",
-        Style::default().fg(DIM),
+        Style::default().fg(DIM()),
     ));
     lines.push(Line::styled(
         "against libraries the rest of the system does not have yet, and is",
-        Style::default().fg(DIM),
+        Style::default().fg(DIM()),
     ));
     lines.push(Line::styled(
         "the most common way a rolling install gets broken.",
-        Style::default().fg(DIM),
+        Style::default().fg(DIM()),
     ));
 
     lines.push(Line::raw(""));
@@ -696,16 +727,16 @@ fn draw_update_confirm(
             "[{}] snapper snapshot first  (Ctrl+S)",
             if snapshot { "x" } else { " " }
         ),
-        Style::default().fg(if snapshot { OK } else { DIM }),
+        Style::default().fg(if snapshot { OK() } else { DIM() }),
     ));
     lines.push(Line::styled(
         "$ sudo pacman -Syu".to_string(),
-        Style::default().fg(DIM),
+        Style::default().fg(DIM()),
     ));
     lines.push(Line::raw(""));
     lines.push(Line::styled(
         "Enter upgrade   Esc cancel".to_string(),
-        Style::default().fg(DIM),
+        Style::default().fg(DIM()),
     ));
     render_popup(f, popup, " update ", lines);
 }
@@ -718,7 +749,7 @@ fn draw_update_confirm(
 fn draw_install_confirm(f: &mut Frame, popup: Rect, request: &crate::ops::InstallRequest) {
     let mut lines: Vec<Line> = vec![Line::styled(
         format!("{} {}", request.package, request.version),
-        Style::default().add_modifier(Modifier::BOLD).fg(ACCENT),
+        Style::default().add_modifier(Modifier::BOLD).fg(ACCENT()),
     )];
     lines.push(Line::raw(""));
     lines.push(field(
@@ -735,7 +766,7 @@ fn draw_install_confirm(f: &mut Frame, popup: Rect, request: &crate::ops::Instal
     if !request.warnings.is_empty() {
         lines.push(Line::raw(""));
         for w in &request.warnings {
-            lines.push(Line::styled(w.clone(), Style::default().fg(WARN)));
+            lines.push(Line::styled(w.clone(), Style::default().fg(WARN())));
         }
     }
 
@@ -743,18 +774,18 @@ fn draw_install_confirm(f: &mut Frame, popup: Rect, request: &crate::ops::Instal
         lines.push(Line::raw(""));
         lines.push(Line::styled(
             "Press P to read the PKGBUILD before installing.",
-            Style::default().fg(ACCENT),
+            Style::default().fg(ACCENT()),
         ));
         lines.push(Line::styled(
             "It is a shell script that runs on your machine.",
-            Style::default().fg(DIM),
+            Style::default().fg(DIM()),
         ));
     }
 
     lines.push(Line::raw(""));
     lines.push(Line::styled(
         format!("$ {}", request.command_line()),
-        Style::default().fg(DIM),
+        Style::default().fg(DIM()),
     ));
     lines.push(Line::raw(""));
 
@@ -766,7 +797,7 @@ fn draw_install_confirm(f: &mut Frame, popup: Rect, request: &crate::ops::Instal
             "Enter install   Esc cancel"
         }
         .to_string(),
-        Style::default().fg(if blocked { DANGER } else { DIM }),
+        Style::default().fg(if blocked { DANGER() } else { DIM() }),
     ));
     render_popup(f, popup, " install ", lines);
 }
@@ -778,11 +809,11 @@ fn draw_install_confirm(f: &mut Frame, popup: Rect, request: &crate::ops::Instal
 fn draw_restore_confirm(f: &mut Frame, popup: Rect, plan: &crate::ops::restore::RestorePlan) {
     let mut lines: Vec<Line> = vec![Line::styled(
         "Undo the last removal",
-        Style::default().add_modifier(Modifier::BOLD).fg(ACCENT),
+        Style::default().add_modifier(Modifier::BOLD).fg(ACCENT()),
     )];
     lines.push(Line::styled(
         format!("removed with {} on {}", plan.operation, format_date(plan.timestamp)),
-        Style::default().fg(DIM),
+        Style::default().fg(DIM()),
     ));
     lines.push(Line::raw(""));
 
@@ -792,25 +823,25 @@ fn draw_restore_confirm(f: &mut Frame, popup: Rect, plan: &crate::ops::restore::
                 "{} package(s) are no longer in the package cache:",
                 plan.missing.len()
             ),
-            Style::default().fg(DANGER),
+            Style::default().fg(DANGER()),
         ));
         for (n, v) in plan.missing.iter().take(6) {
-            lines.push(Line::styled(format!("  {n} {v}"), Style::default().fg(DIM)));
+            lines.push(Line::styled(format!("  {n} {v}"), Style::default().fg(DIM())));
         }
         lines.push(Line::raw(""));
         lines.push(Line::styled(
             "A partial restore would leave the system in a state neither you",
-            Style::default().fg(DIM),
+            Style::default().fg(DIM()),
         ));
         lines.push(Line::styled(
             "nor this tool could describe, so it is not offered.",
-            Style::default().fg(DIM),
+            Style::default().fg(DIM()),
         ));
         lines.push(Line::styled(
             "Reinstall from the repositories instead, or roll back the snapshot.",
-            Style::default().fg(DIM),
+            Style::default().fg(DIM()),
         ));
-        lines.push(Line::styled("Esc to close", Style::default().fg(DIM)));
+        lines.push(Line::styled("Esc to close", Style::default().fg(DIM())));
         render_popup(f, popup, " undo ", lines);
         return;
     }
@@ -825,7 +856,7 @@ fn draw_restore_confirm(f: &mut Frame, popup: Rect, plan: &crate::ops::restore::
     if plan.available.len() > 10 {
         lines.push(Line::styled(
             format!("  … and {} more", plan.available.len() - 10),
-            Style::default().fg(DIM),
+            Style::default().fg(DIM()),
         ));
     }
 
@@ -833,23 +864,23 @@ fn draw_restore_confirm(f: &mut Frame, popup: Rect, plan: &crate::ops::restore::
         lines.push(Line::raw(""));
         lines.push(Line::styled(
             "That removal was a purge: config files were deleted and cannot",
-            Style::default().fg(WARN),
+            Style::default().fg(WARN()),
         ));
         lines.push(Line::styled(
             "be restored by reinstalling. Only the packages come back.",
-            Style::default().fg(WARN),
+            Style::default().fg(WARN()),
         ));
     }
 
     lines.push(Line::raw(""));
     lines.push(Line::styled(
         format!("$ {}", plan.command_line()),
-        Style::default().fg(DIM),
+        Style::default().fg(DIM()),
     ));
     lines.push(Line::raw(""));
     lines.push(Line::styled(
         "Enter restore   Esc cancel",
-        Style::default().fg(DIM),
+        Style::default().fg(DIM()),
     ));
     render_popup(f, popup, " undo ", lines);
 }
@@ -860,7 +891,7 @@ fn render_popup(f: &mut Frame, popup: Rect, title: &str, lines: Vec<Line>) {
         Paragraph::new(lines).wrap(Wrap { trim: false }).block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(DANGER))
+                .border_style(Style::default().fg(DANGER()))
                 .title(title.to_string()),
         ),
         popup,
@@ -896,7 +927,7 @@ fn draw_tabs(f: &mut Frame, area: Rect, ui: &Ui) {
         f.render_widget(
             Paragraph::new(Line::styled(
                 label,
-                Style::default().fg(Color::Black).bg(OK),
+                Style::default().fg(Color::Black).bg(OK()),
             )),
             Rect {
                 x: area.x + area.width.saturating_sub(w + 14),
@@ -910,15 +941,15 @@ fn draw_tabs(f: &mut Frame, area: Rect, ui: &Ui) {
         // appears frozen.
         let w = area.width.saturating_sub(14);
         f.render_widget(
-            Paragraph::new(Line::styled(" refreshing… ", Style::default().fg(OK))),
+            Paragraph::new(Line::styled(" refreshing… ", Style::default().fg(OK()))),
             Rect { x: area.x + w, width: 13.min(area.width), ..area },
         );
     }
     f.render_widget(
         Tabs::new(titles)
             .select(selected)
-            .style(Style::default().fg(DIM))
-            .highlight_style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD))
+            .style(Style::default().fg(DIM()))
+            .highlight_style(Style::default().fg(ACCENT()).add_modifier(Modifier::BOLD))
             .divider(""),
         area,
     );
@@ -929,7 +960,7 @@ fn draw_tabs(f: &mut Frame, area: Rect, ui: &Ui) {
 fn draw_lock_banner(f: &mut Frame, area: Rect) {
     f.render_widget(
         Paragraph::new(" another pacman process is running — data may be out of date ")
-            .style(Style::default().fg(Color::Black).bg(WARN)),
+            .style(Style::default().fg(Color::Black).bg(WARN())),
         area,
     );
 }
@@ -971,7 +1002,7 @@ fn draw_list(f: &mut Frame, area: Rect, ui: &mut Ui) {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(if focused { ACCENT } else { DIM }))
+                    .border_style(Style::default().fg(if focused { ACCENT() } else { DIM() }))
                     .title(title),
             )
             .highlight_style(
@@ -993,14 +1024,14 @@ fn row_line<'a>(ui: &'a Ui, item: Item) -> Line<'a> {
             Line::from(vec![
                 Span::styled(format!("{tag:<5} "), Style::default().fg(colour)),
                 Span::raw(app.name.clone()),
-                Span::styled(size_suffix(ui, app), Style::default().fg(DIM)),
+                Span::styled(size_suffix(ui, app), Style::default().fg(DIM())),
             ])
         }
         Item::Tool(i) => {
             let tool = &ui.state.catalog.tools[i];
             Line::from(vec![
                 Span::raw(tool.name.clone()),
-                Span::styled(size_suffix(ui, tool), Style::default().fg(DIM)),
+                Span::styled(size_suffix(ui, tool), Style::default().fg(DIM())),
             ])
         }
         Item::Package(p) => {
@@ -1009,7 +1040,7 @@ fn row_line<'a>(ui: &'a Ui, item: Item) -> Line<'a> {
                 Span::raw(pkg.name.clone()),
                 Span::styled(
                     format!("  {}", human_size(pkg.size_bytes())),
-                    Style::default().fg(DIM),
+                    Style::default().fg(DIM()),
                 ),
             ])
         }
@@ -1022,15 +1053,15 @@ fn row_line<'a>(ui: &'a Ui, item: Item) -> Line<'a> {
                 Span::styled(
                     format!("{:<8} ", u.kind.label()),
                     Style::default().fg(match u.kind {
-                        crate::ops::update::Kind::App => ACCENT,
+                        crate::ops::update::Kind::App => ACCENT(),
                         crate::ops::update::Kind::Tool => Color::Reset,
-                        crate::ops::update::Kind::Package => DIM,
+                        crate::ops::update::Kind::Package => DIM(),
                     }),
                 ),
                 Span::raw(label),
                 Span::styled(
                     format!("  {} → {}", u.installed, u.available),
-                    Style::default().fg(DIM),
+                    Style::default().fg(DIM()),
                 ),
                 Span::styled(
                     if u.source == crate::ops::update::UpdateSource::Aur {
@@ -1038,7 +1069,7 @@ fn row_line<'a>(ui: &'a Ui, item: Item) -> Line<'a> {
                     } else {
                         ""
                     },
-                    Style::default().fg(WARN),
+                    Style::default().fg(WARN()),
                 ),
             ])
         }
@@ -1049,12 +1080,12 @@ fn row_line<'a>(ui: &'a Ui, item: Item) -> Line<'a> {
             let mut spans = vec![
                 Span::styled(
                     format!("{:<5} ", if hit.origin == crate::data::search::Origin::Aur { "aur" } else { "repo" }),
-                    Style::default().fg(if hit.origin == crate::data::search::Origin::Aur { WARN } else { DIM }),
+                    Style::default().fg(if hit.origin == crate::data::search::Origin::Aur { WARN() } else { DIM() }),
                 ),
                 Span::raw(hit.name.clone()),
             ];
             if hit.installed {
-                spans.push(Span::styled("  installed", Style::default().fg(OK)));
+                spans.push(Span::styled("  installed", Style::default().fg(OK())));
             }
             // Wording matters here: "out of date" reads as "your system needs
             // an update", which is a different thing entirely and lives in the
@@ -1062,11 +1093,11 @@ fn row_line<'a>(ui: &'a Ui, item: Item) -> Line<'a> {
             if hit.out_of_date {
                 spans.push(Span::styled(
                     "  packaging behind upstream",
-                    Style::default().fg(WARN),
+                    Style::default().fg(WARN()),
                 ));
             }
             if hit.orphaned {
-                spans.push(Span::styled("  no maintainer", Style::default().fg(WARN)));
+                spans.push(Span::styled("  no maintainer", Style::default().fg(WARN())));
             }
             Line::from(spans)
         }
@@ -1086,8 +1117,8 @@ fn source_tag(source: Source) -> (&'static str, Color) {
         Source::Pacman => ("pkg", Color::Reset),
         Source::Flatpak => ("flat", Color::Blue),
         Source::AppImage => ("img", Color::Magenta),
-        Source::Steam => ("steam", DIM),
-        Source::Unowned => ("?", WARN),
+        Source::Steam => ("steam", DIM()),
+        Source::Unowned => ("?", WARN()),
     }
 }
 
@@ -1095,7 +1126,7 @@ fn draw_detail(f: &mut Frame, area: Rect, ui: &mut Ui) {
     let mut lines: Vec<Line> = Vec::new();
 
     match ui.current() {
-        None => lines.push(Line::styled("nothing selected", Style::default().fg(DIM))),
+        None => lines.push(Line::styled("nothing selected", Style::default().fg(DIM()))),
         Some(item) => {
             detail_header(ui, item, &mut lines);
             detail_package(ui, &mut lines);
@@ -1127,7 +1158,7 @@ fn draw_detail(f: &mut Frame, area: Rect, ui: &mut Ui) {
     // both halves sit inside one border.
     let details_block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(DIM))
+        .border_style(Style::default().fg(DIM()))
         .title(" details ");
     let inner = details_block.inner(chunks[0]);
     f.render_widget(details_block, chunks[0]);
@@ -1170,7 +1201,7 @@ fn draw_detail(f: &mut Frame, area: Rect, ui: &mut Ui) {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(DIM))
+                    .border_style(Style::default().fg(DIM()))
                     .title(" impact preview (nothing is removed) "),
             ),
         chunks[1],
@@ -1187,10 +1218,10 @@ fn draw_detail(f: &mut Frame, area: Rect, ui: &mut Ui) {
             RelatedRow::RemoveAction => {
                 let (text, colour) = match ui.selected_package() {
                     Some(p) if ui.denylist.is_protected(p) => {
-                        ("protected — this cannot be removed", DIM)
+                        ("protected — this cannot be removed", DIM())
                     }
-                    Some(_) => ("Remove this…  (Del)", DANGER),
-                    None => ("no package to remove", DIM),
+                    Some(_) => ("Remove this…  (Del)", DANGER()),
+                    None => ("no package to remove", DIM()),
                 };
                 ListItem::new(Line::styled(
                     text.to_string(),
@@ -1200,15 +1231,15 @@ fn draw_detail(f: &mut Frame, area: Rect, ui: &mut Ui) {
             RelatedRow::Relation(r) => {
                 let colour = match r.kind {
                     RelationKind::DependsOn => Color::Reset,
-                    RelationKind::RequiredBy => ACCENT,
-                    RelationKind::Optional => WARN,
+                    RelationKind::RequiredBy => ACCENT(),
+                    RelationKind::Optional => WARN(),
                 };
                 let mut spans = vec![
                     Span::styled(format!("{:<12} ", r.kind.label()), Style::default().fg(colour)),
                     Span::raw(ui.state.graph.name(r.pkg).to_string()),
                 ];
                 if let Some(note) = &r.note {
-                    spans.push(Span::styled(format!("  — {note}"), Style::default().fg(DIM)));
+                    spans.push(Span::styled(format!("  — {note}"), Style::default().fg(DIM())));
                 }
                 ListItem::new(Line::from(spans))
             }
@@ -1229,7 +1260,7 @@ fn draw_detail(f: &mut Frame, area: Rect, ui: &mut Ui) {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(if related_focused { ACCENT } else { DIM }))
+                    .border_style(Style::default().fg(if related_focused { ACCENT() } else { DIM() }))
                     .title(title),
             )
             .highlight_style(Style::default().add_modifier(Modifier::BOLD).bg(
@@ -1252,7 +1283,7 @@ fn detail_header(ui: &Ui, item: Item, lines: &mut Vec<Line>) {
         if let Some(u) = ui.sorted_updates.get(i) {
             lines.push(Line::styled(
                 u.display_name.clone().unwrap_or_else(|| u.name.clone()),
-                Style::default().add_modifier(Modifier::BOLD).fg(ACCENT),
+                Style::default().add_modifier(Modifier::BOLD).fg(ACCENT()),
             ));
             lines.push(Line::raw(""));
             lines.push(field("package", &u.name));
@@ -1268,11 +1299,11 @@ fn detail_header(ui: &Ui, item: Item, lines: &mut Vec<Line>) {
             lines.push(Line::raw(""));
             lines.push(Line::styled(
                 "u  upgrade the whole system  (recommended)",
-                Style::default().fg(OK),
+                Style::default().fg(OK()),
             ));
             lines.push(Line::styled(
                 "→  upgrade only this package",
-                Style::default().fg(WARN),
+                Style::default().fg(WARN()),
             ));
         }
     }
@@ -1286,7 +1317,7 @@ fn detail_header(ui: &Ui, item: Item, lines: &mut Vec<Line>) {
     if let Some(app) = app {
         lines.push(Line::styled(
             app.name.clone(),
-            Style::default().add_modifier(Modifier::BOLD).fg(ACCENT),
+            Style::default().add_modifier(Modifier::BOLD).fg(ACCENT()),
         ));
         if let Some(s) = &app.summary {
             lines.push(Line::raw(s.clone()));
@@ -1306,16 +1337,16 @@ fn detail_header(ui: &Ui, item: Item, lines: &mut Vec<Line>) {
         // Every classification is explainable — the tool must be able to say
         // why it believes what it says (spec §16).
         lines.push(Line::raw(""));
-        lines.push(Line::styled("evidence", Style::default().fg(DIM)));
+        lines.push(Line::styled("evidence", Style::default().fg(DIM())));
         for e in &app.evidence {
-            lines.push(Line::styled(format!("  {}", evidence_text(e)), Style::default().fg(DIM)));
+            lines.push(Line::styled(format!("  {}", evidence_text(e)), Style::default().fg(DIM())));
         }
 
         if app.source == Source::AppImage {
             lines.push(Line::raw(""));
             lines.push(Line::styled(
                 "self-contained bundle — no dependencies to show",
-                Style::default().fg(DIM),
+                Style::default().fg(DIM()),
             ));
         }
         lines.push(Line::raw(""));
@@ -1326,7 +1357,7 @@ fn detail_header(ui: &Ui, item: Item, lines: &mut Vec<Line>) {
 fn detail_hit(hit: &crate::data::search::Hit, lines: &mut Vec<Line>) {
     lines.push(Line::styled(
         hit.name.clone(),
-        Style::default().add_modifier(Modifier::BOLD).fg(ACCENT),
+        Style::default().add_modifier(Modifier::BOLD).fg(ACCENT()),
     ));
     if let Some(d) = &hit.description {
         lines.push(Line::raw(d.clone()));
@@ -1350,40 +1381,40 @@ fn detail_hit(hit: &crate::data::search::Hit, lines: &mut Vec<Line>) {
         // plainly is the point at which a novice can still decide otherwise.
         lines.push(Line::styled(
             "From the AUR: built from source, not reviewed by Arch.",
-            Style::default().fg(WARN),
+            Style::default().fg(WARN()),
         ));
         if hit.orphaned {
             lines.push(Line::raw(""));
             lines.push(Line::styled(
                 "No maintainer.",
-                Style::default().fg(WARN).add_modifier(Modifier::BOLD),
+                Style::default().fg(WARN()).add_modifier(Modifier::BOLD),
             ));
             lines.push(Line::styled(
                 "Nobody has volunteered to look after this AUR entry. It will",
-                Style::default().fg(DIM),
+                Style::default().fg(DIM()),
             ));
             lines.push(Line::styled(
                 "not be updated, and may stop building as Arch moves on.",
-                Style::default().fg(DIM),
+                Style::default().fg(DIM()),
             ));
         }
         if hit.out_of_date {
             lines.push(Line::raw(""));
             lines.push(Line::styled(
                 "Packaging is behind upstream.",
-                Style::default().fg(WARN).add_modifier(Modifier::BOLD),
+                Style::default().fg(WARN()).add_modifier(Modifier::BOLD),
             ));
             lines.push(Line::styled(
                 "Users flagged this AUR entry as older than the project's own",
-                Style::default().fg(DIM),
+                Style::default().fg(DIM()),
             ));
             lines.push(Line::styled(
                 "latest release. This is about the recipe, not about your",
-                Style::default().fg(DIM),
+                Style::default().fg(DIM()),
             ));
             lines.push(Line::styled(
                 "system — installed updates live in the Updates view.",
-                Style::default().fg(DIM),
+                Style::default().fg(DIM()),
             ));
         }
     }
@@ -1469,7 +1500,7 @@ fn impact_lines(ui: &mut Ui) -> Vec<Line<'static>> {
             },
             _ => "no pacman package backs this, so there is nothing to simulate",
         };
-        return vec![Line::styled(msg, Style::default().fg(DIM))];
+        return vec![Line::styled(msg, Style::default().fg(DIM()))];
     };
     let apps_lost: Vec<String> = ui.apps_lost(&plan).iter().map(|s| s.to_string()).collect();
 
@@ -1486,18 +1517,18 @@ fn impact_lines(ui: &mut Ui) -> Vec<Line<'static>> {
             .collect();
         lines.push(Line::styled(
             format!("blocked — still required by {}", blockers.join(", ")),
-            Style::default().fg(DANGER),
+            Style::default().fg(DANGER()),
         ));
         return lines;
     }
 
     let total = plan.all_removed().len();
     let colour = if total > 20 {
-        DANGER
+        DANGER()
     } else if total > 5 {
-        WARN
+        WARN()
     } else {
-        OK
+        OK()
     };
     lines.push(Line::styled(
         format!(
@@ -1514,7 +1545,7 @@ fn impact_lines(ui: &mut Ui) -> Vec<Line<'static>> {
         // preview: "this will also remove GIMP" beats "this will remove gegl".
         lines.push(Line::styled(
             format!("applications lost: {}", apps_lost.join(", ")),
-            Style::default().fg(DANGER),
+            Style::default().fg(DANGER()),
         ));
     }
     if !plan.optdep_losses.is_empty() {
@@ -1526,7 +1557,7 @@ fn impact_lines(ui: &mut Ui) -> Vec<Line<'static>> {
             .collect();
         lines.push(Line::styled(
             format!("would silently degrade: {}", names.join(", ")),
-            Style::default().fg(WARN),
+            Style::default().fg(WARN()),
         ));
     }
 
@@ -1596,7 +1627,7 @@ fn draw_keybar(f: &mut Frame, area: Rect, ui: &Ui) {
         f.render_widget(
             Paragraph::new(Line::styled(
                 format!(" {notice} "),
-                Style::default().fg(Color::Black).bg(WARN),
+                Style::default().fg(Color::Black).bg(WARN()),
             )),
             area,
         );
@@ -1607,9 +1638,9 @@ fn draw_keybar(f: &mut Frame, area: Rect, ui: &Ui) {
     for (key, what) in hints {
         spans.push(Span::styled(
             format!(" {key} "),
-            Style::default().fg(Color::Black).bg(ACCENT),
+            Style::default().fg(Color::Black).bg(ACCENT()),
         ));
-        spans.push(Span::styled(format!(" {what}  "), Style::default().fg(DIM)));
+        spans.push(Span::styled(format!(" {what}  "), Style::default().fg(DIM())));
     }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -1625,7 +1656,7 @@ fn draw_help(f: &mut Frame, area: Rect, ui: &Ui) {
     };
 
     let mut lines = vec![
-        Line::styled("apothiki — read-only explorer", Style::default().fg(ACCENT)),
+        Line::styled("apothiki — read-only explorer", Style::default().fg(ACCENT())),
         Line::raw(""),
         Line::raw("1 2 3 4 5 6    Apps / Tools / Deps / Orphans / Search / Updates"),
         Line::raw("Tab / Shift+Tab  next / previous view"),
@@ -1646,39 +1677,39 @@ fn draw_help(f: &mut Frame, area: Rect, ui: &Ui) {
         Line::raw(""),
         Line::styled(
             "Ctrl+F and Ctrl+Q also work, and are the only forms",
-            Style::default().fg(DIM),
+            Style::default().fg(DIM()),
         ),
-        Line::styled("that reach you while typing.", Style::default().fg(DIM)),
+        Line::styled("that reach you while typing.", Style::default().fg(DIM())),
         Line::raw(""),
         Line::styled(
             "Removals run through pacman itself, never by writing",
-            Style::default().fg(OK),
+            Style::default().fg(OK()),
         ),
         Line::styled(
             "to its database. Every plan is checked against a",
-            Style::default().fg(OK),
+            Style::default().fg(OK()),
         ),
-        Line::styled("pacman dry-run before it runs.", Style::default().fg(OK)),
+        Line::styled("pacman dry-run before it runs.", Style::default().fg(OK())),
         Line::raw(""),
     ];
     if !ui.enhanced_keys {
         lines.push(Line::styled(
             "Terminal lacks the Kitty keyboard protocol;",
-            Style::default().fg(DIM),
+            Style::default().fg(DIM()),
         ));
         lines.push(Line::styled(
             "fallback bindings are in use.",
-            Style::default().fg(DIM),
+            Style::default().fg(DIM()),
         ));
     }
-    lines.push(Line::styled("press any key", Style::default().fg(DIM)));
+    lines.push(Line::styled("press any key", Style::default().fg(DIM())));
 
     f.render_widget(Clear, popup);
     f.render_widget(
         Paragraph::new(lines).block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(ACCENT))
+                .border_style(Style::default().fg(ACCENT()))
                 .title(" help "),
         ),
         popup,
@@ -1687,7 +1718,7 @@ fn draw_help(f: &mut Frame, area: Rect, ui: &Ui) {
 
 fn field<'a>(name: &'a str, value: &str) -> Line<'a> {
     Line::from(vec![
-        Span::styled(format!("{name:<15}"), Style::default().fg(DIM)),
+        Span::styled(format!("{name:<15}"), Style::default().fg(DIM())),
         Span::raw(value.to_string()),
     ])
 }

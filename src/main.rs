@@ -8,6 +8,7 @@
 //! tools that predate it and remain useful for scripted checks.
 
 mod apps;
+mod config;
 mod data;
 mod ops;
 mod state;
@@ -29,6 +30,7 @@ fn main() -> anyhow::Result<()> {
         Some("doctor") => doctor(),
         Some("search") => search_probe(),
         Some("aur-sync") => aur_sync(),
+        Some("config") => write_config(),
         Some("--help" | "-h") => {
             println!(
                 "apo — application-centric package explorer\n\n\
@@ -36,13 +38,27 @@ fn main() -> anyhow::Result<()> {
                  apo stats        parse statistics\n\
                  apo apps         application catalog\n\
                  apo apps tools   tools list\n\
-                 apo verify [n|names…]   check the model against pacman\n\n\
+                 apo verify [n|names…]   check the model against pacman\n\
+                 apo doctor       check the removal pipeline\n\
+                 apo config       write an example config file\n\n\
                  This build is read-only and removes nothing."
             );
             Ok(())
         }
         _ => run_tui(),
     }
+}
+
+/// Writes a commented example configuration.
+fn write_config() -> anyhow::Result<()> {
+    match config::Config::write_example() {
+        Ok(path) => println!("wrote {}", path.display()),
+        Err(e) => println!("{e}"),
+    }
+    if let (_, Some(err)) = config::Config::load() {
+        println!("note: the current config has a problem and is being ignored:\n  {err}");
+    }
+    Ok(())
 }
 
 /// Downloads the AUR package index.
@@ -268,8 +284,9 @@ fn run_tui() -> anyhow::Result<()> {
         );
     }
 
-    let state = state::SystemState::load()?;
-    ui::run(state)
+    let (config, config_error) = config::Config::load();
+    let state = state::SystemState::load_with(&config)?;
+    ui::run(state, config, config_error)
 }
 
 /// `getuid(2)` without pulling in the `libc` crate for one call.

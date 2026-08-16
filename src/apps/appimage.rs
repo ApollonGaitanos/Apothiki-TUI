@@ -36,14 +36,23 @@ pub struct AppImage {
 /// Deliberately includes `~/AppImages`, which the spec omits and which is where
 /// this machine actually keeps them. Belongs in config, not code.
 pub fn default_dirs() -> Vec<PathBuf> {
+    dirs_with(&[])
+}
+
+/// The default directories plus any the user configured.
+pub fn dirs_with(extra: &[String]) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = extra.iter().map(PathBuf::from).collect();
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
-        return vec![PathBuf::from("/opt")];
+        out.push(PathBuf::from("/opt"));
+        return out;
     };
-    ["AppImages", "Applications", "Downloads", "bin", ".local/bin"]
-        .iter()
-        .map(|d| home.join(d))
-        .chain(std::iter::once(PathBuf::from("/opt")))
-        .collect()
+    out.extend(
+        ["AppImages", "Applications", "Downloads", "bin", ".local/bin"]
+            .iter()
+            .map(|d| home.join(d)),
+    );
+    out.push(PathBuf::from("/opt"));
+    out
 }
 
 fn is_appimage(path: &Path) -> bool {

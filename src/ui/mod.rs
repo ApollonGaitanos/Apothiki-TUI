@@ -26,6 +26,7 @@ use crate::data::graph::{OrphanMode, PkgIdx, RemovalPlan};
 use crate::data::local::Reason;
 use crate::ops::safety::Denylist;
 use crate::ops::{RemovalMode, RemovalRequest};
+use crate::config::{Action, Config, Keymap, Theme};
 use crate::state::SystemState;
 use removal::{RemovalDialog, Stage};
 
@@ -184,6 +185,12 @@ pub struct Ui {
     /// A transient message shown in the hint bar, so a keypress that cannot do
     /// anything explains itself instead of appearing broken.
     pub notice: Option<String>,
+    /// The user's configuration, and what it resolves to.
+    pub config: Config,
+    pub keymap: Keymap,
+    pub theme: Theme,
+    /// Reported once at startup when the config could not be read.
+    pub config_error: Option<String>,
     /// Terminal graphics backend, probed once at startup.
     pub picker: Option<ratatui_image::picker::Picker>,
     /// Repository databases, loaded in the background: ~260 ms that nothing in
@@ -221,6 +228,10 @@ pub struct Ui {
 impl Ui {
     /// Everything derived from a `SystemState`, rebuilt whenever it is replaced.
     fn derive(state: &SystemState) -> Derived {
+        Self::derive_with(state, &[])
+    }
+
+    fn derive_with(state: &SystemState, also_protect: &[String]) -> Derived {
         let mut apps_by_package: HashMap<String, Vec<usize>> = HashMap::new();
         let mut apps_named_by_package: HashMap<String, Vec<String>> = HashMap::new();
         for (i, app) in state.catalog.apps.iter().enumerate() {
@@ -232,7 +243,7 @@ impl Ui {
                     .push(app.name.clone());
             }
         }
-        let denylist = Denylist::build(&state.graph);
+        let denylist = Denylist::build_with(&state.graph, also_protect);
         let app_package_names: std::collections::HashSet<String> = state
             .catalog
             .apps
@@ -251,14 +262,19 @@ impl Ui {
         state: SystemState,
         enhanced_keys: bool,
         picker: Option<ratatui_image::picker::Picker>,
+        config: Config,
+        config_error: Option<String>,
     ) -> Self {
-        let d = Self::derive(&state);
+        let d = Self::derive_with(&state, &config.safety.also_protect);
         let (apps_by_package, denylist, app_package_names, apps_named_by_package) = (
             d.apps_by_package,
             d.denylist,
             d.app_package_names,
             d.apps_named_by_package,
         );
+
+        let keymap = config.keymap();
+        let theme = config.theme();
 
         let mut ui = Ui {
             state,
@@ -282,7 +298,11 @@ impl Ui {
             app_package_names,
             apps_named_by_package,
             needs_reload: false,
-            notice: None,
+            notice: config_error.clone().map(|e| format!("config ignored: {e}")),
+            config,
+            keymap,
+            theme,
+            config_error,
             sync: None,
             sync_rx: None,
             aur: None,
@@ -1214,7 +1234,7 @@ impl Ui {
                 .unwrap_or_default(),
         });
 
-        let d = Self::derive(&state);
+        let d = Self::derive_with(&state, &self.config.safety.also_protect);
         self.state = state;
         self.apps_by_package = d.apps_by_package;
         self.denylist = d.denylist;
@@ -1511,57 +1531,20 @@ impl Ui {
             return;
         }
 
+        // Configurable bindings are consulted first; navigation keys below are
+        // fixed, because remapping arrows and Enter would make the hint bar and
+        // every explanation in the UI wrong.
+        if let Some(action) = self.keymap.action_for(key.code, key.modifiers) {
+            if self.dispatch(action) {
+                return;
+            }
+        }
+
+        // Everything past here is fixed navigation. Arrows, Enter and Escape are
+        // deliberately not rebindable: the hint bar, the help overlay and every
+        // explanatory line in the UI names them, and a remapped Enter would make
+        // all of that text quietly wrong.
         match key.code {
-            // Plain `q` quits. Ctrl+Q stays as an alias because it is the only
-            // one that works while a text field has focus.
-            KeyCode::Char('q' | 'Q') => self.should_quit = true,
-            KeyCode::Char('c') if ctrl => self.should_quit = true,
-            KeyCode::F(1) => self.show_help = true,
-
-            // Views on the number row. F-keys kept as aliases.
-            KeyCode::Char('1') => self.switch_view(View::Apps),
-            KeyCode::Char('2') => self.switch_view(View::Tools),
-            KeyCode::Char('3') => self.switch_view(View::Dependencies),
-            KeyCode::Char('4') => self.switch_view(View::Orphans),
-            KeyCode::F(2) => self.switch_view(View::Apps),
-            KeyCode::F(3) => self.switch_view(View::Tools),
-            KeyCode::F(4) => self.switch_view(View::Dependencies),
-            KeyCode::F(6) => self.switch_view(View::Orphans),
-            KeyCode::Char('5') => self.switch_view(View::Search),
-            KeyCode::Char('6') => self.switch_view(View::Updates),
-            KeyCode::F(7) => self.switch_view(View::Search),
-            KeyCode::F(5) => self.start_reload(),
-
-            // Search is explicit now: typing no longer starts it, so the number
-            // row stays available for view switching.
-            // Plain `f` focuses the query. Ctrl+F remains an alias.
-            KeyCode::Char('f' | 'F') => {
-                self.searching = true;
-                // In the search view this resumes editing the existing query;
-                // elsewhere it starts a fresh filter.
-                if self.view != View::Search {
-                    self.query.clear();
-                }
-            }
-
-            KeyCode::Delete => self.open_removal(),
-            // Where this package's files live (spec §14).
-            KeyCode::Char('l' | 'L') => self.toggle_locations(),
-            // Upgrading is reachable only from the view that shows what it
-            // would do. The badge in the tab bar is how you learn it exists.
-            KeyCode::Char('u' | 'U') if self.view == View::Updates => self.open_update(),
-            KeyCode::Char('u' | 'U') => {
-                self.switch_view(View::Updates);
-            }
-            // Undo the last removal, restoring from the package cache.
-            KeyCode::Char('z') if ctrl => self.open_undo(),
-            // Bulk orphan cleanup, offered only where it makes sense.
-            KeyCode::Char('c') if self.view == View::Orphans => self.open_orphan_cleanup(),
-
-            // Tab walks the views. Pane focus is already covered by Right and
-            // Left, which is a more natural fit for moving deeper and back.
-            KeyCode::Tab => self.cycle_view(1),
-            KeyCode::BackTab => self.cycle_view(-1),
             KeyCode::Up => self.move_selection(-1, 1),
             KeyCode::Down => self.move_selection(1, 1),
             KeyCode::PageUp => self.move_selection(-1, 10),
@@ -1571,7 +1554,7 @@ impl Ui {
 
             // Right/Enter descends: list → relationships → the selected package.
             KeyCode::Right | KeyCode::Enter => self.descend(),
-            // Left/Backspace ascends: relationships → list → wherever we came from.
+            // Left/Backspace ascends: relationships → list → where we came from.
             KeyCode::Left | KeyCode::Backspace => self.ascend(),
 
             KeyCode::Esc => {
@@ -1582,19 +1565,10 @@ impl Ui {
                     self.ascend();
                 }
             }
-
-            // The -Qdt / -Qdtt distinction, exposed rather than hidden. These are
-            // different safety levels and the user is entitled to both.
-            KeyCode::Char(' ') if self.view == View::Orphans => {
-                self.orphan_mode = match self.orphan_mode {
-                    OrphanMode::Conservative => OrphanMode::Aggressive,
-                    OrphanMode::Aggressive => OrphanMode::Conservative,
-                };
-                self.rebuild_rows();
-            }
             _ => {}
         }
     }
+
 
     /// Moves to the next or previous view, wrapping around.
     fn cycle_view(&mut self, delta: isize) {
@@ -1607,7 +1581,58 @@ impl Ui {
         self.switch_view(View::ALL[next]);
     }
 
-    #[allow(dead_code)]
+    /// Runs a bound action. Returns false when it does not apply here, so the
+    /// key can fall through to the fixed navigation handling.
+    fn dispatch(&mut self, action: Action) -> bool {
+        match action {
+            Action::Quit => self.should_quit = true,
+            Action::Help => self.show_help = true,
+            Action::Search => {
+                self.searching = true;
+                if self.view != View::Search {
+                    self.query.clear();
+                }
+            }
+            Action::Remove => self.open_removal(),
+            Action::Undo => self.open_undo(),
+            Action::Files => self.toggle_locations(),
+            Action::Refresh => self.start_reload(),
+            Action::NextView => self.cycle_view(1),
+            Action::PrevView => self.cycle_view(-1),
+            Action::View(n) => {
+                if let Some(v) = View::ALL.get(n.saturating_sub(1)) {
+                    self.switch_view(*v);
+                }
+            }
+            Action::Update => {
+                if self.view == View::Updates {
+                    self.open_update();
+                } else {
+                    self.switch_view(View::Updates);
+                }
+            }
+            // These only mean something in the Orphans view; elsewhere the key
+            // should do whatever it would otherwise have done.
+            Action::ToggleOrphanMode => {
+                if self.view != View::Orphans {
+                    return false;
+                }
+                self.orphan_mode = match self.orphan_mode {
+                    OrphanMode::Conservative => OrphanMode::Aggressive,
+                    OrphanMode::Aggressive => OrphanMode::Conservative,
+                };
+                self.rebuild_rows();
+            }
+            Action::CleanOrphans => {
+                if self.view != View::Orphans {
+                    return false;
+                }
+                self.open_orphan_cleanup();
+            }
+        }
+        true
+    }
+
     fn toggle_focus(&mut self) {
         self.focus = match self.focus {
             Focus::List => {
@@ -1746,7 +1771,11 @@ fn supports_graphics_protocol() -> bool {
 }
 
 /// Runs the UI until the user quits.
-pub fn run(state: SystemState) -> anyhow::Result<()> {
+pub fn run(
+    state: SystemState,
+    config: Config,
+    config_error: Option<String>,
+) -> anyhow::Result<()> {
     // Warm the icon index off the render loop. It is only needed for entries
     // the fast path cannot place, but building it costs ~600 ms, and paying
     // that on the first arrow key over a Steam shortcut is a visible stall.
@@ -1763,7 +1792,8 @@ pub fn run(state: SystemState) -> anyhow::Result<()> {
     let picker = probe_picker();
 
     let (mut terminal, guard) = term::init()?;
-    let mut ui = Ui::new(state, guard.enhanced_keys, picker);
+    let mut ui = Ui::new(state, guard.enhanced_keys, picker, config, config_error);
+    render::set_theme(ui.theme);
     ui.start_background_loads();
 
     while !ui.should_quit {

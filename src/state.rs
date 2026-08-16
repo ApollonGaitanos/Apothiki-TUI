@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use crate::apps::{self, Catalog};
+use crate::config::Config;
 use crate::data::fileindex::FileIndex;
 use crate::data::graph::Graph;
 use crate::data::local::LocalDb;
@@ -29,19 +30,27 @@ pub struct SystemState {
 }
 
 impl SystemState {
-    /// Loads everything M1's views need. Runs off the render loop.
+    /// Loads everything the views need, using the user's configuration.
+    pub fn load_with(config: &Config) -> anyhow::Result<Self> {
+        Self::load_inner(
+            &config.apps.merge_suffixes,
+            &config.apps.noise,
+        )
+    }
+
+    /// Loads with built-in defaults, for the command-line subcommands.
     pub fn load() -> anyhow::Result<Self> {
+        let config = Config::default();
+        Self::load_with(&config)
+    }
+
+    fn load_inner(suffixes: &[String], noise: &[String]) -> anyhow::Result<Self> {
         let started = std::time::Instant::now();
 
         let db = Arc::new(LocalDb::load(LocalDb::DEFAULT_ROOT)?);
         let (index, _) = FileIndex::load_or_build(&db);
 
-        let suffixes: Vec<String> = apps::DEFAULT_MERGE_SUFFIXES
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        let noise: Vec<String> = apps::DEFAULT_NOISE.iter().map(|s| s.to_string()).collect();
-        let catalog = apps::resolve(&db, &index, &suffixes, &noise);
+        let catalog = apps::resolve(&db, &index, suffixes, noise);
 
         let graph = Graph::build(Arc::clone(&db));
 
